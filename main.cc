@@ -11,18 +11,18 @@ extern "C" {
 #include "yac_interface.h"
 }
 
-int define_field(int instance_id, const char* comp_name, int comp_id, const char *field_name) {
+int define_input_field(int instance_id, const char* comp_name, int comp_id, const char *field_name) {
 
   int cyclic[] = {0, 0};
-  int n_vertices[] = {2, 2};
-  double grid_x[] = {0, 1, 0, 1};
-  double grid_y[] = {-1, -1, 1, 1};
+  int n_vertices[] = {3, 3};
+  double grid_x[] = {-1, 0, 1, -1, 0, 1, -1, 0, 1};
+  double grid_y[] = {-1, -1, -1, 0, 0, 0, 1, 1, 1};
   int grid_id = 0;
 
-  const int n_cells = 1;
-  int n_points[] = {1, 1};
-  double points_x[n_cells] = {0.5};
-  double points_y[n_cells] = {0.0};
+  const int n_cells = 4;
+  int n_points[] = {2, 2};
+  double points_x[n_cells] = {-0.5, 0.5, -0.5, 0.5};
+  double points_y[n_cells] = {-0.5, -0.5, 0.5, 0.5};
 
   yac_cdef_grid_curve2d(comp_name, n_vertices, cyclic, grid_x, grid_y, &grid_id);
 
@@ -41,6 +41,39 @@ int define_field(int instance_id, const char* comp_name, int comp_id, const char
 
   return target_field_id;
 }
+
+
+int define_target_field(int instance_id, const char* comp_name, int comp_id, const char *field_name) {
+
+  int cyclic[] = {0, 0};
+  int n_vertices[] = {2, 2};
+  double grid_x[] = {-0.5, 0.5, -0.5, 0.5};
+  double grid_y[] = {-0.5, -0.5, 0.5, 0.5};
+  int grid_id = 0;
+
+  const int n_cells = 1;
+  int n_points[] = {1, 1};
+  double points_x[n_cells] = {0};
+  double points_y[n_cells] = {0};
+
+  yac_cdef_grid_curve2d(comp_name, n_vertices, cyclic, grid_x, grid_y, &grid_id);
+
+  int point_id = 0;
+  yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, points_x,
+                          points_y, &point_id);
+
+  int point_set_size = n_cells;
+  int collection_size = 1;
+
+  int target_field_id = 0;
+  const char *time_step_length = "1";
+  yac_cdef_field(field_name, comp_id, &point_id, point_set_size,
+                 collection_size, time_step_length, YAC_TIME_UNIT_SECOND,
+                 &target_field_id);
+
+  return target_field_id;
+}
+
 
 int main(int argc, char **argv) {
 
@@ -79,8 +112,8 @@ int main(int argc, char **argv) {
       int output_id = comp_ids[1];
 
       // Define fields:
-      int input_field = define_field(instance_id, "input", input_id, "source");
-      int target_field = define_field(instance_id, "output", output_id, "target");
+      int input_field = define_input_field(instance_id, "input", input_id, "source");
+      int target_field = define_target_field(instance_id, "output", output_id, "target");
 
       // Define the interpolation stack:
       int interp_stack_id = 0;
@@ -119,7 +152,7 @@ int main(int argc, char **argv) {
       int collection_size = 1;
       int ierror = 0;
       {
-        double send_field_data[1] = {3.0};
+        double send_field_data[4] = {1.0, 2.0, 3.0, 4.0};
         double *send_field_[1] = {&send_field_data[0]};
         double **send_field[1] = {&send_field_[0]};
         int info;
