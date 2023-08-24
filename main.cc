@@ -66,6 +66,8 @@ int main(int argc, char **argv) {
       int instance_id = 0;
       yac_cinit_instance(&instance_id);
       yac_cdef_calendar(YAC_PROLEPTIC_GREGORIAN);
+      // Note: zero-padding of months and days *is* required.
+      yac_cdef_datetime_instance(instance_id, "-1-01-01", "+1-01-01");
 
       int interp_stack_id = 0;
       yac_cget_interp_stack_config(&interp_stack_id);
