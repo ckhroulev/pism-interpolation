@@ -30,7 +30,7 @@ int define_input_field(int instance_id, const char* comp_name, int comp_id, cons
   yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, points_x,
                           points_y, &point_id);
 
-  int point_set_size = n_cells;
+  int point_set_size = 1;
   int collection_size = 1;
 
   int target_field_id = 0;
@@ -62,7 +62,7 @@ int define_target_field(int instance_id, const char* comp_name, int comp_id, con
   yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, points_x,
                           points_y, &point_id);
 
-  int point_set_size = n_cells;
+  int point_set_size = 1;
   int collection_size = 1;
 
   int target_field_id = 0;
