@@ -1,17 +1,18 @@
 #include <mpi.h>
 
-#include "pism/util/petscwrappers/PetscInitializer.hh"
-#include "pism/util/Context.hh"
 #include "pism/util/ConfigInterface.hh"
+#include "pism/util/Context.hh"
 #include "pism/util/Logger.hh"
 #include "pism/util/error_handling.hh"
+#include "pism/util/petscwrappers/PetscInitializer.hh"
 #include "pism/util/pism_options.hh"
 
 extern "C" {
 #include "yac_interface.h"
 }
 
-int define_input_field(int instance_id, const char* comp_name, int comp_id, const char *field_name) {
+int define_input_field(int instance_id, const char *comp_name, int comp_id,
+                       const char *field_name) {
 
   int cyclic[] = {0, 0};
   int n_vertices[] = {3, 3};
@@ -24,7 +25,8 @@ int define_input_field(int instance_id, const char* comp_name, int comp_id, cons
   double points_x[n_cells] = {-0.5, 0.5, -0.5, 0.5};
   double points_y[n_cells] = {-0.5, -0.5, 0.5, 0.5};
 
-  yac_cdef_grid_curve2d(comp_name, n_vertices, cyclic, grid_x, grid_y, &grid_id);
+  yac_cdef_grid_curve2d(comp_name, n_vertices, cyclic, grid_x, grid_y,
+                        &grid_id);
 
   int point_id = 0;
   yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, points_x,
@@ -42,8 +44,8 @@ int define_input_field(int instance_id, const char* comp_name, int comp_id, cons
   return target_field_id;
 }
 
-
-int define_target_field(int instance_id, const char* comp_name, int comp_id, const char *field_name) {
+int define_target_field(int instance_id, const char *comp_name, int comp_id,
+                        const char *field_name) {
 
   int cyclic[] = {0, 0};
   int n_vertices[] = {2, 2};
@@ -56,7 +58,8 @@ int define_target_field(int instance_id, const char* comp_name, int comp_id, con
   double points_x[n_cells] = {0};
   double points_y[n_cells] = {0};
 
-  yac_cdef_grid_curve2d(comp_name, n_vertices, cyclic, grid_x, grid_y, &grid_id);
+  yac_cdef_grid_curve2d(comp_name, n_vertices, cyclic, grid_x, grid_y,
+                        &grid_id);
 
   int point_id = 0;
   yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, points_x,
@@ -73,7 +76,6 @@ int define_target_field(int instance_id, const char* comp_name, int comp_id, con
 
   return target_field_id;
 }
-
 
 int main(int argc, char **argv) {
 
@@ -87,7 +89,8 @@ int main(int argc, char **argv) {
 
     auto config = ctx->config();
 
-    pism::options::String input("-input", "name of the file describing the input grid");
+    pism::options::String input("-input",
+                                "name of the file describing the input grid");
 
     auto log = ctx->log();
 
@@ -112,16 +115,21 @@ int main(int argc, char **argv) {
       int output_id = comp_ids[1];
 
       // Define fields:
-      int input_field = define_input_field(instance_id, "input", input_id, "source");
-      int target_field = define_target_field(instance_id, "output", output_id, "target");
+      int input_field =
+          define_input_field(instance_id, "input", input_id, "source");
+      int target_field =
+          define_target_field(instance_id, "output", output_id, "target");
 
       // Define the interpolation stack:
       int interp_stack_id = 0;
       {
         yac_cget_interp_stack_config(&interp_stack_id);
         // add average
-        yac_cadd_interp_stack_config_average(interp_stack_id, YAC_AVG_DIST, 0);
-        yac_cadd_interp_stack_config_nnn(interp_stack_id, YAC_NNN_AVG, 1, 1.0);
+        yac_cadd_interp_stack_config_average(interp_stack_id, YAC_AVG_DIST,
+                                             0 /* partial_coverage = false */);
+        yac_cadd_interp_stack_config_nnn(interp_stack_id, YAC_NNN_AVG,
+                                         1 /* one nearest neighbor */,
+                                         1.0 /* scaling */);
         // constant if averaging failed
         yac_cadd_interp_stack_config_fixed(interp_stack_id, -9999);
       }
