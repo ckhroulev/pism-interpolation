@@ -26,6 +26,27 @@ include_directories (${MPI_C_INCLUDE_PATH})
 
 find_package(PkgConfig REQUIRED)
 
+macro(pism_find_petsc)
+  find_package(PkgConfig REQUIRED)
+
+  # Add PETSc directories to CMAKE_PREFIX_PATH (the first on for the
+  # "in place" build, the second for the "prefix" build):
+  list(APPEND CMAKE_PREFIX_PATH "$ENV{PETSC_DIR}/$ENV{PETSC_ARCH}")
+  list(APPEND CMAKE_PREFIX_PATH "$ENV{PETSC_DIR}")
+
+  message(STATUS
+    "Looking for PETSc (PETSC_DIR='$ENV{PETSC_DIR}', PETSC_ARCH='$ENV{PETSC_ARCH}')...")
+
+  pkg_search_module(PETSC IMPORTED_TARGET "PETSc>=3.7.0")
+
+  if (PETSC_FOUND)
+    message(STATUS
+      "Found PETSc: ${PETSC_PREFIX} (found version \"${PETSC_VERSION}\")")
+  endif()
+endmacro()
+
+pism_find_petsc()
+
 pkg_search_module(YAC REQUIRED IMPORTED_TARGET "yac>=3.0")
 if (YAC_FOUND)
   message(STATUS
@@ -39,4 +60,4 @@ if (PISM_FOUND)
 endif()
 
 add_executable(pism_interp main.cc)
-target_link_libraries(pism_interp MPI::MPI_C MPI::MPI_CXX PkgConfig::PISM PkgConfig::YAC)
+target_link_libraries(pism_interp MPI::MPI_C MPI::MPI_CXX PkgConfig::PETSC PkgConfig::PISM PkgConfig::YAC)
