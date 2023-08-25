@@ -2,10 +2,15 @@
 
 #include "pism/util/ConfigInterface.hh"
 #include "pism/util/Context.hh"
+#include "pism/util/Grid.hh"
 #include "pism/util/Logger.hh"
+#include "pism/util/array/Scalar.hh"
 #include "pism/util/error_handling.hh"
+#include "pism/util/io/File.hh"
+#include "pism/util/io/IO_Flags.hh"
 #include "pism/util/petscwrappers/PetscInitializer.hh"
 #include "pism/util/pism_options.hh"
+#include "pism/util/projection.hh"
 
 extern "C" {
 #include "yac_interface.h"
@@ -119,6 +124,29 @@ int main(int argc, char **argv) {
     auto log = ctx->log();
 
     log->message(2, "Reading from %s...\n", input->c_str());
+
+    auto grid = pism::Grid::FromFile(ctx, input, {"topg", "thk"},
+                                     pism::grid::CELL_CENTER);
+
+    pism::array::Scalar topg(grid, "bed_topography");
+
+    pism::MappingInfo mapping("mapping", ctx->unit_system());
+    {
+      pism::File input_file(ctx->com(), input, pism::io::PISM_GUESS,
+                            pism::io::PISM_READONLY);
+
+      mapping =
+          pism::get_projection_info(input_file, "mapping", ctx->unit_system());
+    }
+
+    pism::LonLatCalculator LL(mapping.proj);
+
+    // FIXME:
+    //
+    // 1. compute lon,lat coordinates (in radian) for the grid corresponding to cell bounds
+    // 2. compute lon,lat cell center coordinates (in radian)
+    //
+    // Cell bound coordinates don't need to be stored in a pism::array.
 
     {
       // Initialize an instance:
