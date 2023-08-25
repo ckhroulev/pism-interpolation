@@ -252,11 +252,6 @@ int main(int argc, char **argv) {
     log->message(2, "\nOutput grid read from %s:\n", output->c_str());
     output_grid->report_parameters();
 
-    pism::array::Scalar topg(input_grid, "bed_topography");
-    topg.metadata().units("m").standard_name("bedrock_altitude");
-
-    topg.regrid(input, pism::io::CRITICAL);
-
     auto input_projection = projection(ctx->com(), input, ctx->unit_system());
     auto output_projection = projection(ctx->com(), output, ctx->unit_system());
 
@@ -322,24 +317,30 @@ int main(int argc, char **argv) {
 
       int collection_size = 1;
       int ierror = 0;
-      if (0) {
-        double send_field_data[4] = {1.0, 2.0, 3.0, 4.0};
-        double *send_field_[1] = {&send_field_data[0]};
+      {
+        pism::array::Scalar topg(input_grid, "bed_topography");
+        topg.metadata().units("m").standard_name("bedrock_altitude");
+        topg.regrid(input, pism::io::CRITICAL);
+
+        pism::petsc::VecArray array(topg.vec());
+
+        double *send_field_[1] = {array.get()};
         double **send_field[1] = {&send_field_[0]};
         int info;
         yac_cput(source_field, collection_size, send_field, &info, &ierror);
       }
 
-      if (0) {
-        const int N = 4;
-        double recv_field_data[N] = {-1.0, -1.0, -1.0, -1.0};
-        double *recv_field[1] = {&recv_field_data[0]};
+      {
+        pism::array::Scalar output(output_grid, "bed_topography");
+        output.metadata().units("m").standard_name("bedrock_altitude");
+
+        pism::petsc::VecArray array(output.vec());
+
+        double *recv_field[1] = {array.get()};
         int info;
         yac_cget(target_field, collection_size, recv_field, &info, &ierror);
 
-        for (int k = 0; k < N; ++k) {
-          log->message(2, "Got %f\n", recv_field_data[k]);
-        }
+        output.dump(output_file->c_str());
       }
 
       yac_ccleanup_instance(instance_id);
