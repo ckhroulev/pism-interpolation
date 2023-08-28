@@ -1,12 +1,13 @@
+#include <cassert>
 #include <memory>
 #include <mpi.h>
-#include <pism/util/Units.hh>
 #include <vector>
 
 #include "pism/util/ConfigInterface.hh"
 #include "pism/util/Context.hh"
 #include "pism/util/Grid.hh"
 #include "pism/util/Logger.hh"
+#include "pism/util/Units.hh"
 #include "pism/util/array/Scalar.hh"
 #include "pism/util/error_handling.hh"
 #include "pism/util/io/File.hh"
@@ -33,9 +34,11 @@ extern "C" {
  *
  * Returns the point ID that can be used to define a "field".
  */
-static int define_grid(const char *grid_name, int n_vertices[2], double *grid_lon,
-                       double *grid_lat, int n_points[2], double *cell_lon,
-                       double *cell_lat) {
+static int define_grid(const char *grid_name, int n_vertices[2],
+                       double *grid_lon, double *grid_lat, int n_points[2],
+                       double *cell_lon, double *cell_lat) {
+
+
 
   int cyclic[] = {0, 0};
   int grid_id = 0;
@@ -81,16 +84,16 @@ struct Grid {
     lat.resize(N);
 
     // convert from (row, col) to the linear index in "cell" arrays
-    auto C = [ncol](int row, int col) { return col * ncol + row; };
+    auto C = [ncol](int row, int col) { return row * ncol + col; };
 
     // convert from degrees to radians
     auto deg2rad = [](double degree) { return degree * M_PI / 180; };
 
-    pism::LonLatCalculator LL(projection);
+    pism::LonLatCalculator mapping(projection);
 
     for (int row = 0; row < nrow; ++row) {
       for (int col = 0; col < ncol; ++col) {
-        auto coords = LL.lonlat(x[col], y[row]);
+        auto coords = mapping.lonlat(x[col], y[row]);
 
         lon[C(row, col)] = deg2rad(coords[0]);
         lat[C(row, col)] = deg2rad(coords[1]);
@@ -102,19 +105,19 @@ struct Grid {
 /*!
  * Define the PISM grid. Each PE defines its own subdomain.
  */
-static int define_grid(const pism::Grid &grid, const std::string &grid_name,
+static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string &grid_name,
                        const std::string &projection) {
 
-  std::vector<double> x(grid.xm());
-  std::vector<double> y(grid.ym());
+  std::vector<double> x(grid->xm());
+  std::vector<double> y(grid->ym());
 
   // Set x and y to coordinates of cell centers:
   {
     for (int k = 0; k < x.size(); ++k) {
-      x[k] = grid.x(grid.xs() + k);
+      x[k] = grid->x(grid->xs() + k);
     }
     for (int k = 0; k < y.size(); ++k) {
-      y[k] = grid.y(grid.ys() + k);
+      y[k] = grid->y(grid->ys() + k);
     }
   }
 
@@ -125,8 +128,8 @@ static int define_grid(const pism::Grid &grid, const std::string &grid_name,
   // Shift x and y by half a grid spacing and add one more row and
   // column to get coordinates of cell corners:
   {
-    double dx = grid.dx();
-    double dy = grid.dy();
+    double dx = grid->dx();
+    double dy = grid->dy();
 
     double x_last = x.back() + 0.5 * dx;
     for (int k = 0; k < x.size(); ++k) {
@@ -167,52 +170,35 @@ static int define_field(int comp_id, int point_id, const char *field_name) {
   return field_id;
 }
 
-int define_input_field(const char *comp_name, int comp_id,
-                       const char *grid_name, const char *field_name) {
-
-  int n_vertices[] = {3, 3};
-  double grid_x[] = {-1, 0, 1, -1, 0, 1, -1, 0, 1};
-  double grid_y[] = {-1, -1, -1, 0, 0, 0, 1, 1, 1};
-
-  int n_points[] = {2, 2};
-  double points_x[] = {-0.5, 0.5, -0.5, 0.5};
-  double points_y[] = {-0.5, -0.5, 0.5, 0.5};
-
-  int point_id = define_grid(grid_name, n_vertices, grid_x, grid_y, n_points,
-                             points_x, points_y);
-
-  return define_field(comp_id, point_id, field_name);
-}
-
-int define_target_field(const char *comp_name, int comp_id,
-                        const char *grid_name, const char *field_name) {
-
-  int n_vertices[] = {2, 2};
-  double grid_x[] = {-0.25, 0.25, -0.25, 0.25};
-  double grid_y[] = {-0.25, -0.25, 0.25, 0.25};
-
-  int point_id = define_grid(grid_name, n_vertices, grid_x, grid_y, nullptr,
-                             nullptr, nullptr);
-
-  return define_field(comp_id, point_id, field_name);
-}
-
-static int define_average_interpolation(double missing_value) {
+static int define_interpolation(double missing_value) {
   int id = 0;
   yac_cget_interp_stack_config(&id);
-  // add average
-  yac_cadd_interp_stack_config_average(id, YAC_AVG_DIST,
-                                       0 /* partial_coverage = false */);
+
+  int order = 1;
+  int enforce_conservation = 1;
+  int partial_coverage = 0;
+
+  // conservative
+  yac_cadd_interp_stack_config_conservative(
+      id, order, enforce_conservation, partial_coverage, YAC_CONSERV_DESTAREA);
+
+  // average over source grid nodes containing a target point, weighted using barycentric
+  yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
+
   // add nearest neighbor
-  yac_cadd_interp_stack_config_nnn(
-      id, YAC_NNN_DIST, 1 /* one nearest neighbor */, 1.0 /* scaling */);
+  int n_neighbors = 1;
+  double scaling = 1.0;
+  yac_cadd_interp_stack_config_nnn(id, YAC_NNN_DIST, n_neighbors, scaling);
+
   // constant if the above failed
   yac_cadd_interp_stack_config_fixed(id, missing_value);
 
   return id;
 }
 
-std::string projection(MPI_Comm com, const std::string &filename, pism::units::System::Ptr sys) {
+//! Get projection info from a NetCDF file. Returns a PROJ string.
+std::string projection(MPI_Comm com, const std::string &filename,
+                       pism::units::System::Ptr sys) {
   pism::File input_file(com, filename, pism::io::PISM_GUESS,
                         pism::io::PISM_READONLY);
 
@@ -272,21 +258,17 @@ int main(int argc, char **argv) {
       yac_cdef_comp_instance(instance_id, comp_name, &comp_id);
 
       // Define grids:
-      int input_grid_id = define_grid(*input_grid, "source", input_projection);
+      int input_grid_id = define_grid(input_grid, "source", input_projection);
       int output_grid_id =
-          define_grid(*output_grid, "target", output_projection);
+          define_grid(output_grid, "target", output_projection);
 
       // Define fields:
       int source_field = define_field(comp_id, input_grid_id, "source");
       int target_field = define_field(comp_id, output_grid_id, "target");
 
-      // int input_field =
-      //     define_input_field(comp_name, comp_id, "source", "source");
-      // int target_field =
-      //     define_target_field(comp_name, comp_id, "target", "target");
-
       // Define the interpolation stack:
-      int interp_stack_id = define_average_interpolation(-9999.0);
+      double fill_value = -99999;
+      int interp_stack_id = define_interpolation(fill_value);
 
       // Define the coupling between fields:
       const int src_lag = 0;
@@ -318,11 +300,11 @@ int main(int argc, char **argv) {
       int collection_size = 1;
       int ierror = 0;
       {
-        pism::array::Scalar topg(input_grid, "bed_topography");
-        topg.metadata().units("m").standard_name("bedrock_altitude");
-        topg.regrid(input, pism::io::CRITICAL);
+        pism::array::Scalar input_field(input_grid, "topg");
+        input_field.metadata().units("m").standard_name("bedrock_altitude");
+        input_field.regrid(input, pism::io::CRITICAL);
 
-        pism::petsc::VecArray array(topg.vec());
+        pism::petsc::VecArray array(input_field.vec());
 
         double *send_field_[1] = {array.get()};
         double **send_field[1] = {&send_field_[0]};
@@ -333,7 +315,7 @@ int main(int argc, char **argv) {
       {
         pism::array::Scalar output(output_grid, "bed_topography");
         output.metadata().units("m").standard_name("bedrock_altitude");
-
+        output.metadata()["_FillValue"] = {fill_value};
         pism::petsc::VecArray array(output.vec());
 
         double *recv_field[1] = {array.get()};
