@@ -24,11 +24,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package (MPI REQUIRED COMPONENTS C CXX)
 include_directories (${MPI_C_INCLUDE_PATH})
 
-find_package(PkgConfig REQUIRED)
+function(find_lib PREFIX SPEC)
+  find_package(PkgConfig REQUIRED)
+  pkg_search_module(${PREFIX} REQUIRED IMPORTED_TARGET ${SPEC})
+  if (${${PREFIX}_FOUND})
+    message(STATUS "Found ${PREFIX}: ${${PREFIX}_PREFIX} (found version \"${${PREFIX}_VERSION}\")")
+  endif()
+endfunction()
 
 macro(pism_find_petsc)
-  find_package(PkgConfig REQUIRED)
-
   # Add PETSc directories to CMAKE_PREFIX_PATH (the first on for the
   # "in place" build, the second for the "prefix" build):
   list(APPEND CMAKE_PREFIX_PATH "$ENV{PETSC_DIR}/$ENV{PETSC_ARCH}")
@@ -37,27 +41,14 @@ macro(pism_find_petsc)
   message(STATUS
     "Looking for PETSc (PETSC_DIR='$ENV{PETSC_DIR}', PETSC_ARCH='$ENV{PETSC_ARCH}')...")
 
-  pkg_search_module(PETSC IMPORTED_TARGET "PETSc>=3.7.0")
-
-  if (PETSC_FOUND)
-    message(STATUS
-      "Found PETSc: ${PETSC_PREFIX} (found version \"${PETSC_VERSION}\")")
-  endif()
+  find_lib(PETSC "PETSc>=3.7.0")
 endmacro()
 
 pism_find_petsc()
 
-pkg_search_module(YAC REQUIRED IMPORTED_TARGET "yac>=3.0")
-if (YAC_FOUND)
-  message(STATUS
-    "Found YAC: ${YAC_PREFIX} (found version \"${YAC_VERSION}\")")
-endif()
-
-pkg_search_module(PISM REQUIRED IMPORTED_TARGET "pism")
-if (PISM_FOUND)
-  message(STATUS
-    "Found PISM: ${PISM_PREFIX} (found version \"${PISM_VERSION}\")")
-endif()
+find_lib(YAC "yac>=3.0")
+find_lib(PISM "pism")
+find_lib(NETCDF "netcdf")
 
 add_executable(pism_interp main.cc)
-target_link_libraries(pism_interp MPI::MPI_C MPI::MPI_CXX PkgConfig::PETSC PkgConfig::PISM PkgConfig::YAC)
+target_link_libraries(pism_interp MPI::MPI_C MPI::MPI_CXX PkgConfig::PETSC PkgConfig::PISM PkgConfig::YAC PkgConfig::NETCDF)
