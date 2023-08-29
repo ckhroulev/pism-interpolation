@@ -1,6 +1,7 @@
 #include <cassert>
 #include <memory>
 #include <mpi.h>
+#include <pism/util/array/Array.hh>
 #include <vector>
 
 #include "pism/util/ConfigInterface.hh"
@@ -36,7 +37,7 @@ extern "C" {
  */
 static int define_grid(const char *grid_name, int n_vertices[2],
                        double *grid_lon, double *grid_lat, int n_points[2],
-                       double *cell_lon, double *cell_lat) {
+                       double *cell_lon, double *cell_lat, int *cell_global_index) {
 
 
 
@@ -46,14 +47,13 @@ static int define_grid(const char *grid_name, int n_vertices[2],
   yac_cdef_grid_curve2d(grid_name, n_vertices, cyclic, grid_lon, grid_lat,
                         &grid_id);
 
+  yac_cset_global_index(cell_global_index, YAC_LOCATION_CELL, grid_id);
+
+  assert(n_points != nullptr and cell_lon != nullptr and cell_lat != nullptr);
+
   int point_id = 0;
-  if (n_points != nullptr and cell_lon != nullptr and cell_lat != nullptr) {
-    yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, cell_lon,
-                            cell_lat, &point_id);
-  } else {
-    yac_cdef_points_curve2d(grid_id, n_vertices, YAC_LOCATION_CORNER, grid_lon,
-                            grid_lat, &point_id);
-  }
+  yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, cell_lon,
+                          cell_lat, &point_id);
 
   return point_id;
 }
@@ -148,9 +148,19 @@ static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string
   Grid nodes(x, y, projection);
   int n_nodes[2] = {(int)x.size(), (int)y.size()};
 
+  std::vector<int> cell_global_index(n_cells[0] * n_cells[1]);
+  {
+    int k = 0;
+    for (auto p = grid->points(); p; p.next()) {
+      int i = p.i(), j = p.j();
+      cell_global_index[k] = j * grid->Mx() + i;
+      ++k;
+    }
+  }
+
   return define_grid(grid_name.c_str(), n_nodes, nodes.lon.data(),
                      nodes.lat.data(), n_cells, cells.lon.data(),
-                     cells.lat.data());
+                     cells.lat.data(), cell_global_index.data());
 }
 
 /*!
@@ -185,12 +195,12 @@ static int define_interpolation(double missing_value) {
   // average over source grid nodes containing a target point, weighted using barycentric
   yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
 
-  // add nearest neighbor
+  // nearest neighbor
   int n_neighbors = 1;
   double scaling = 1.0;
   yac_cadd_interp_stack_config_nnn(id, YAC_NNN_DIST, n_neighbors, scaling);
 
-  // constant if the above failed
+  // constant if all of the above failed
   yac_cadd_interp_stack_config_fixed(id, missing_value);
 
   return id;
@@ -293,9 +303,14 @@ int main(int argc, char **argv) {
       // free the interpolation stack config now that we defined the coupling
       yac_cfree_interp_stack_config(interp_stack_id);
 
+      double start = 0;
+      double end = 0;
+
       log->message(2, "Initializing interpolation... ");
+      start = MPI_Wtime();
       yac_cenddef_instance(instance_id);
-      log->message(2, "done.\n");
+      end = MPI_Wtime();
+      log->message(2, "done in %f seconds.\n", end - start);
 
       int collection_size = 1;
       int ierror = 0;
@@ -309,9 +324,9 @@ int main(int argc, char **argv) {
         double *send_field_[1] = {array.get()};
         double **send_field[1] = {&send_field_[0]};
         int info;
+        start = MPI_Wtime();
         yac_cput(source_field, collection_size, send_field, &info, &ierror);
       }
-
       {
         pism::array::Scalar output(output_grid, "bed_topography");
         output.metadata().units("m").standard_name("bedrock_altitude");
@@ -321,9 +336,11 @@ int main(int argc, char **argv) {
         double *recv_field[1] = {array.get()};
         int info;
         yac_cget(target_field, collection_size, recv_field, &info, &ierror);
-
+        end = MPI_Wtime();
         output.dump(output_file->c_str());
       }
+
+      log->message(2, "Data transfer took %f seconds.\n", end - start);
 
       yac_ccleanup_instance(instance_id);
     }
