@@ -284,6 +284,7 @@ int main(int argc, char **argv) {
       const int src_lag = 0;
       const int tgt_lag = 0;
       const int mapping_side = 1; // 1 means "mapping on source"
+      const char* weight_file_name = "interpolation_weights.nc";
       yac_cdef_couple_instance(
           instance_id,
           "interpolation",         // input component name
@@ -297,7 +298,7 @@ int main(int argc, char **argv) {
           YAC_REDUCTION_TIME_NONE, // reduction in time (for asynchronous
                                    // coupling)
           interp_stack_id, src_lag, tgt_lag,
-          nullptr, // weight file name (disabled)
+          weight_file_name,
           mapping_side);
 
       // free the interpolation stack config now that we defined the coupling
