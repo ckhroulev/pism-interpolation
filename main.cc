@@ -284,7 +284,7 @@ int main(int argc, char **argv) {
       const int src_lag = 0;
       const int tgt_lag = 0;
       const int mapping_side = 1; // 1 means "mapping on source"
-      const char* weight_file_name = "interpolation_weights.nc";
+      const char *weight_file_name = nullptr;
       yac_cdef_couple_instance(
           instance_id,
           "interpolation",         // input component name
