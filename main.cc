@@ -102,22 +102,51 @@ struct Grid {
   }
 };
 
+struct GridInfo {
+
+  // grid coordinates, in meters
+  std::vector<double> x, y;
+
+  // PROJ string defining the projection
+  std::string projection;
+
+  // Domain decomposition
+
+  // first x index of the local subdomain
+  int xs;
+  // number of grid points in the x direction in the local subdomain
+  int xm;
+  // first y index of the local subdomain
+  int ys;
+  // number of grid points in the y direction in the local subdomain
+  int ym;
+};
+
 /*!
  * Define the PISM grid. Each PE defines its own subdomain.
  */
 static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string &grid_name,
                        const std::string &projection) {
 
-  std::vector<double> x(grid->xm());
-  std::vector<double> y(grid->ym());
+  GridInfo info;
+  info.x = grid->x();
+  info.y = grid->y();
+  info.xs = grid->xs();
+  info.xm = grid->xm();
+  info.ys = grid->ys();
+  info.ym = grid->ym();
+  info.projection = projection;
+
+  std::vector<double> x(info.xm);
+  std::vector<double> y(info.ym);
 
   // Set x and y to coordinates of cell centers:
   {
     for (int k = 0; k < x.size(); ++k) {
-      x[k] = grid->x(grid->xs() + k);
+      x[k] = info.x[info.xs + k];
     }
     for (int k = 0; k < y.size(); ++k) {
-      y[k] = grid->y(grid->ys() + k);
+      y[k] = info.y[info.ys + k];
     }
   }
 
@@ -128,8 +157,8 @@ static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string
   // Shift x and y by half a grid spacing and add one more row and
   // column to get coordinates of cell corners:
   {
-    double dx = grid->dx();
-    double dy = grid->dy();
+    double dx = info.x[1] - info.x[0];
+    double dy = info.y[1] - info.y[0];
 
     double x_last = x.back() + 0.5 * dx;
     for (int k = 0; k < x.size(); ++k) {
@@ -150,10 +179,11 @@ static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string
 
   std::vector<int> cell_global_index(n_cells[0] * n_cells[1]);
   {
+    int Mx = info.x.size();
     int k = 0;
     for (auto p = grid->points(); p; p.next()) {
       int i = p.i(), j = p.j();
-      cell_global_index[k] = j * grid->Mx() + i;
+      cell_global_index[k] = j * Mx + i;
       ++k;
     }
   }
@@ -263,9 +293,10 @@ int main(int argc, char **argv) {
 
       // Define components: this has to be done using *one* call
       // (cannot call yac_cdef_comp?_instance() more than once)
-      const char *comp_name = "interpolation";
-      int comp_id = 0;
-      yac_cdef_comp_instance(instance_id, comp_name, &comp_id);
+      const int n_comps = 2;
+      const char *comp_names[n_comps] = {"input", "output"};
+      int comp_ids[n_comps] = {0, 0};
+      yac_cdef_comps_instance(instance_id, comp_names, n_comps, comp_ids);
 
       // Define grids:
       int input_grid_id = define_grid(input_grid, "source", input_projection);
@@ -273,8 +304,8 @@ int main(int argc, char **argv) {
           define_grid(output_grid, "target", output_projection);
 
       // Define fields:
-      int source_field = define_field(comp_id, input_grid_id, "source");
-      int target_field = define_field(comp_id, output_grid_id, "target");
+      int source_field = define_field(comp_ids[0], input_grid_id, "source");
+      int target_field = define_field(comp_ids[1], output_grid_id, "target");
 
       // Define the interpolation stack:
       double fill_value = -99999;
@@ -287,10 +318,10 @@ int main(int argc, char **argv) {
       const char *weight_file_name = nullptr;
       yac_cdef_couple_instance(
           instance_id,
-          "interpolation",         // input component name
+          "input",         // input component name
           "source",                // input grid name
           "source",                // input field name
-          "interpolation",         // target component name
+          "output",         // target component name
           "target",                // target grid name
           "target",                // target field name
           "1",                     // time step length in units below
