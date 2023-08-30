@@ -11,6 +11,7 @@ NETCDF=$HOME/local/netcdf
 prefix=$HOME/local/pism-interp
 
 cmake -B build -S . \
+      -DCMAKE_BUILD_TYPE=Debug \
       -DCMAKE_COLOR_MAKEFILE=OFF \
       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
       -DCMAKE_INSTALL_PREFIX=${prefix} \
