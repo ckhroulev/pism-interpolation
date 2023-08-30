@@ -1,6 +1,7 @@
-#include <array> // std::array
-#include <cassert>
-#include <cmath> // M_PI
+#include <array>     // std::array
+#include <cmath>     // M_PI
+#include <cstdarg>   // vsnprintf, va_list, va_end
+#include <cstdio>    // fprintf
 #include <stdexcept> // std::runtime_error
 #include <string>    // std::string
 #include <vector>    // std::vector
@@ -91,6 +92,31 @@ struct LonLatGrid {
     }
   }
 };
+
+/*!
+ * Print a message on rank 0.
+ */
+void print(MPI_Comm com, const char *format, ...) __attribute__((format(printf, 2, 3)));
+void print(MPI_Comm com, const char *format, ...) {
+  int rank = 0;
+  MPI_Comm_rank(com, &rank);
+  if (rank != 0) {
+    return;
+  }
+
+  std::string result(1024, ' ');
+  va_list arglist;
+  size_t length;
+
+  va_start(arglist, format);
+  if((length = vsnprintf(&result[0], result.size(), format, arglist)) > result.size()) {
+    result.reserve(length);
+    vsnprintf(&result[0], result.size(), format, arglist);
+  }
+  va_end(arglist);
+
+  fprintf(stderr, "%s", result.substr(0, length).c_str());
+}
 
 /*!
  * A uniform Cartesian grid in a projected coordinate system.
@@ -333,10 +359,10 @@ int define_grid(const ProjectedGrid &info, const std::string &grid_name) {
 
   // x and y to coordinates of cell centers for the subdomain owned by this PE:
   {
-    for (int k = 0; k < x.size(); ++k) {
+    for (size_t k = 0; k < x.size(); ++k) {
       x[k] = info.x[info.xs + k];
     }
-    for (int k = 0; k < y.size(); ++k) {
+    for (size_t k = 0; k < y.size(); ++k) {
       y[k] = info.y[info.ys + k];
     }
   }
@@ -352,13 +378,13 @@ int define_grid(const ProjectedGrid &info, const std::string &grid_name) {
     double dy = info.y[1] - info.y[0];
 
     double x_last = x.back() + 0.5 * dx;
-    for (int k = 0; k < x.size(); ++k) {
+    for (size_t k = 0; k < x.size(); ++k) {
       x[k] -= 0.5 * dx;
     }
     x.push_back(x_last);
 
     double y_last = y.back() + 0.5 * dy;
-    for (int k = 0; k < y.size(); ++k) {
+    for (size_t k = 0; k < y.size(); ++k) {
       y[k] -= 0.5 * dy;
     }
     y.push_back(y_last);
@@ -448,8 +474,6 @@ int define_interpolation(double missing_value) {
 
 int main(int argc, char **argv) {
 
-  assert(TEST_CASE >= 0 and TEST_CASE <= 2);
-
   MPI_Init(&argc, &argv);
   {
     MPI_Comm com = MPI_COMM_WORLD;
@@ -459,45 +483,75 @@ int main(int argc, char **argv) {
     int size = 0;
     MPI_Comm_size(com, &size);
 
-    assert(size == 1 || size == 4);
+
+    if (TEST_CASE < 0 or TEST_CASE > 2) {
+      print(com, "TEST_CASE has to be 0, 1, or 2\n");
+      MPI_Finalize();
+      return 1;
+    }
+
+    if (not (size == 1 or size == 4)) {
+      print(com, "Please run using 1 or 4 MPI processes\n");
+      MPI_Finalize();
+      return 1;
+    }
 
     {
       // Initialize an instance:
       int instance_id = 0;
+      print(com, "Initializing the YAC instance... ");
       {
         yac_cinit_instance(&instance_id);
         yac_cdef_calendar(YAC_PROLEPTIC_GREGORIAN);
         // Note: zero-padding of months and days *is* required.
         yac_cdef_datetime_instance(instance_id, "-1-01-01", "+1-01-01");
       }
+      print(com, "done\n");
 
       // Define components: this has to be done using *one* call
       // (cannot call yac_cdef_comp?_instance() more than once)
       const int n_comps = 2;
-      const char *comp_names[n_comps] = {"input", "output"};
       int comp_ids[n_comps] = {0, 0};
-      yac_cdef_comps_instance(instance_id, comp_names, n_comps, comp_ids);
+      print(com, "Defining components... ");
+      {
+        const char *comp_names[n_comps] = {"input", "output"};
+        yac_cdef_comps_instance(instance_id, comp_names, n_comps, comp_ids);
+      }
+      print(com, "done\n");
 
       // Define grids:
+      print(com, "Defining the source grid... ");
       ProjectedGrid input = source(rank, size, TEST_CASE);
       int input_grid_id = define_grid(input, "source");
+      print(com, "done\n");
 
+      print(com, "Defining the target grid... ");
       ProjectedGrid output = target(rank, size, TEST_CASE);
       int output_grid_id = define_grid(output, "target");
+      print(com, "done\n");
 
       // Define fields:
-      int source_field = define_field(comp_ids[0], input_grid_id, "source");
-      int target_field = define_field(comp_ids[1], output_grid_id, "target");
+      int source_field = 0;
+      int target_field = 0;
+      print(com, "Defining fields... ");
+      {
+        source_field = define_field(comp_ids[0], input_grid_id, "source");
+        target_field = define_field(comp_ids[1], output_grid_id, "target");
+      }
+      print(com, "done\n");
 
       // Define the interpolation stack:
       double fill_value = -99999;
+      print(com, "Defining the interpolation stack... ");
       int interp_stack_id = define_interpolation(fill_value);
+      print(com, "done\n");
 
       // Define the coupling between fields:
       const int src_lag = 0;
       const int tgt_lag = 0;
       const int mapping_side = 1; // 1 means "mapping on source"
       const char *weight_file_name = nullptr;
+      print(com, "Defining the couple... ");
       yac_cdef_couple_instance(
           instance_id,
           "input",                 // input component name
@@ -511,30 +565,36 @@ int main(int argc, char **argv) {
           YAC_REDUCTION_TIME_NONE, // reduction in time (for asynchronous
                                    // coupling)
           interp_stack_id, src_lag, tgt_lag, weight_file_name, mapping_side);
+      print(com, "done\n");
 
       // free the interpolation stack config now that we defined the coupling
       yac_cfree_interp_stack_config(interp_stack_id);
 
+      print(com, "Computing interpolation weights... ");
       yac_cenddef_instance(instance_id);
+      print(com, "done\n");
 
+      int info;
+      int ierror;
       int collection_size = 1;
-      int ierror = 0;
       {
         std::vector<double> input_array(input.xm * input.ym);
         // the contents of input_array don't matter
 
         double *send_field_[1] = {input_array.data()};
         double **send_field[1] = {&send_field_[0]};
-        int info;
+        print(com, "Calling yac_cput()... ");
         yac_cput(source_field, collection_size, send_field, &info, &ierror);
+        print(com, "done\n");
       }
 
       {
         std::vector<double> output_array(output.xm * output.ym);
 
         double *recv_field[1] = {output_array.data()};
-        int info;
+        print(com, "Calling yac_cget()... ");
         yac_cget(target_field, collection_size, recv_field, &info, &ierror);
+        print(com, "done\n");
       }
 
       yac_ccleanup_instance(instance_id);
