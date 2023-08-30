@@ -32,10 +32,10 @@ public:
   ~LonLatCalculator() { proj_destroy(m_pj); }
 
   std::array<double, 2> lonlat(double x, double y) const {
-    PJ_COORD in, out;
-
+    PJ_COORD in;
     in.xy = {x, y};
-    out = proj_trans(m_pj, PJ_FWD, in);
+
+    PJ_COORD out = proj_trans(m_pj, PJ_FWD, in);
 
     return {out.lp.phi, out.lp.lam};
   }
@@ -46,6 +46,10 @@ private:
 
 /*!
  * Grid definition using lon,lat coordinates in radians.
+ *
+ * Unlike `ProjectedGrid`, this class does not include domain
+ * decomposition info: it is used to store grids corresponding to
+ * subdomains of a distributed grid.
  */
 struct LonLatGrid {
   std::vector<double> lon;
@@ -89,9 +93,13 @@ struct LonLatGrid {
 };
 
 /*!
- * A regular Cartesian grid in a projected coordinate system.
+ * A uniform Cartesian grid in a projected coordinate system.
+ * Coordinates are in meters.
  *
  * Includes domain decomposition info.
+ *
+ * `x` and `y` are grid coordinates in the "global" grid, *not* just
+ * the subdomain corresponding to a particular PE.
  */
 struct ProjectedGrid {
 
@@ -117,10 +125,7 @@ struct ProjectedGrid {
     x = x_;
     y = y_;
     projection = projection_;
-    xs = 0;
-    xm = x.size();
-    ys = 0;
-    ym = y.size();
+    set_decomposition(0, x.size(), 0, y.size());
   }
 
   void set_decomposition(int xs_, int xm_, int ys_, int ym_) {
@@ -131,8 +136,10 @@ struct ProjectedGrid {
   }
 };
 
-// Creates an equally spaced 1D grid of size `N` starting at `start`
-// and using grid spacing `step`.
+/*!
+ * Creates an equally spaced 1D grid of size `N` starting at `start`
+ * and using grid spacing `step`.
+ */
 std::vector<double> linspace(double start, double step, int N) {
   std::vector<double> result(N);
   for (int k = 0; k < N; ++k) {
@@ -142,7 +149,7 @@ std::vector<double> linspace(double start, double step, int N) {
 }
 
 /*!
- * Define a curvilinear Cartesian 2D grid on a sphere.
+ * Define a curvilinear Cartesian 2D grid on a sphere using YAC.
  *
  * `grid_lon` and `grid_lat` should define cell vertices (cell bounds).
  *
@@ -152,7 +159,7 @@ std::vector<double> linspace(double start, double step, int N) {
  *
  * All coordinates are in radians.
  *
- * Returns the point ID that can be used to define a "field".
+ * Returns the point ID that can be used to define a *field*.
  */
 int define_grid(const char *grid_name, int n_vertices[2], double *grid_lon,
                 double *grid_lat, int n_points[2], double *cell_lon,
@@ -166,8 +173,6 @@ int define_grid(const char *grid_name, int n_vertices[2], double *grid_lon,
 
   yac_cset_global_index(cell_global_index, YAC_LOCATION_CELL, grid_id);
 
-  assert(n_points != nullptr and cell_lon != nullptr and cell_lat != nullptr);
-
   int point_id = 0;
   yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, cell_lon,
                           cell_lat, &point_id);
@@ -175,32 +180,80 @@ int define_grid(const char *grid_name, int n_vertices[2], double *grid_lon,
   return point_id;
 }
 
-ProjectedGrid source(int rank) {
+/*!
+ * Define the source grid for the `test_case`.
+ */
+ProjectedGrid source(int rank, int size, int test_case) {
   auto x = linspace(-678200, 900, 1760);
   auto y = linspace(-3371150, 900, 3040);
   const char *proj = "EPSG:3413";
 
   ProjectedGrid result(x, y, proj);
 
-  switch (rank) {
+  if (size == 1) {
+    // no need to set domain decomposition
+    return result;
+  }
+
+  switch (test_case) {
+  default:
   case 0:
-    result.set_decomposition(0, 880, 0, 1520);
+    switch (rank) {
+    case 0:
+      result.set_decomposition(0, 880, 0, 1520);
+      break;
+    case 1:
+      result.set_decomposition(880, 880, 0, 1520);
+      break;
+    case 2:
+      result.set_decomposition(0, 880, 1520, 1520);
+      break;
+    case 3:
+      result.set_decomposition(880, 880, 1520, 1520);
+      break;
+    }
     break;
   case 1:
-    result.set_decomposition(880, 880, 0, 1520);
+    switch (rank) {
+    case 0:
+      result.set_decomposition(0, 1760, 0, 760);
+      break;
+    case 1:
+      result.set_decomposition(0, 1760, 760, 760);
+      break;
+    case 2:
+      result.set_decomposition(0, 1760, 1520, 760);
+      break;
+    case 3:
+      result.set_decomposition(0, 1760, 2280, 760);
+      break;
+    }
     break;
-  case 2:
-    result.set_decomposition(0, 880, 1520, 1520);
-    break;
-  case 3:
-    result.set_decomposition(880, 880, 1520, 1520);
+  case 2: // "good"
+    switch (rank) {
+    case 0:
+      result.set_decomposition(0, 440, 0, 3040);
+      break;
+    case 1:
+      result.set_decomposition(440, 440, 0, 3040);
+      break;
+    case 2:
+      result.set_decomposition(880, 440, 0, 3040);
+      break;
+    case 3:
+      result.set_decomposition(1320, 440, 0, 3040);
+      break;
+    }
     break;
   }
 
   return result;
 }
 
-ProjectedGrid target(int rank) {
+/*!
+ * Define the target grid for the `test_case`.
+ */
+ProjectedGrid target(int rank, int size, int test_case) {
 
   auto x = linspace(-800000, 5000, 301);
   auto y = linspace(-3400000, 5000, 561);
@@ -210,27 +263,75 @@ ProjectedGrid target(int rank) {
 
   ProjectedGrid result(x, y, proj);
 
-  switch (rank) {
-  case 0: result.set_decomposition(0, 301, 0, 141); break;
-  case 1: result.set_decomposition(0, 301, 141, 140); break;
-  case 2: result.set_decomposition(0, 301, 281, 140); break;
-  case 3: result.set_decomposition(0, 301, 421, 140); break;
+  if (size == 1) {
+    return result;
+  }
+
+  switch (test_case) {
+  case 0:
+    switch (rank) {
+    case 0:
+      result.set_decomposition(0, 301, 0, 141);
+      break;
+    case 1:
+      result.set_decomposition(0, 301, 141, 140);
+      break;
+    case 2:
+      result.set_decomposition(0, 301, 281, 140);
+      break;
+    case 3:
+      result.set_decomposition(0, 301, 421, 140);
+      break;
+    }
+    break;
+  case 1:
+    switch (rank) {
+    case 3:
+      result.set_decomposition(0, 301, 421, 140);
+      break;
+    case 1:
+      result.set_decomposition(0, 301, 141, 140);
+      break;
+    case 2:
+      result.set_decomposition(0, 301, 281, 140);
+      break;
+    case 0:
+      result.set_decomposition(0, 301, 0, 141);
+      break;
+    }
+    break;
+  case 2: // "good"
+    switch (rank) {
+    case 0:
+      result.set_decomposition(0, 76, 0, 561);
+      break;
+    case 1:
+      result.set_decomposition(76, 75, 0, 561);
+      break;
+    case 2:
+      result.set_decomposition(151, 75, 0, 561);
+      break;
+    case 3:
+      result.set_decomposition(226, 75, 0, 561);
+      break;
+    }
+    break;
   }
 
   return result;
 }
 
 /*!
- * Define the a regular grid. Each PE defines its own subdomain.
+ * Define a uniform projected grid. Each PE defines its own subdomain.
  *
- * Returns the point ID that can be used to define a "field".
+ * Returns the point ID that can be used to define a *field*.
  */
 int define_grid(const ProjectedGrid &info, const std::string &grid_name) {
 
   std::vector<double> x(info.xm);
   std::vector<double> y(info.ym);
 
-  // Set x and y to coordinates of cell centers:
+  // x and y to coordinates of cell centers for the subdomain owned by this PE:
   {
     for (int k = 0; k < x.size(); ++k) {
       x[k] = info.x[info.xs + k];
@@ -287,7 +388,7 @@ int define_grid(const ProjectedGrid &info, const std::string &grid_name) {
 /*!
  * Define a "field" on a point set `point_id` in the component `comp_id`.
  *
- * Returns the field ID that can be used to define a "couple".
+ * Returns the field ID that can be used to define a *couple*.
  */
 static int define_field(int comp_id, int point_id, const char *field_name) {
 
@@ -320,8 +421,7 @@ int define_interpolation(double missing_value) {
   yac_cadd_interp_stack_config_conservative(
       id, order, enforce_conservation, partial_coverage, YAC_CONSERV_DESTAREA);
 
-  // average over source grid nodes containing a target point, weighted using
-  // barycentric
+  // piecewise-linear on the triangulation of the source grid
   yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
 
   // nearest neighbor
@@ -335,7 +435,20 @@ int define_interpolation(double missing_value) {
   return id;
 }
 
+/*!
+ * Test case choices:
+ *
+ * 0: "bad"
+ * 1: "bad"
+ * 2: "good"
+ */
+#ifndef TEST_CASE
+#define TEST_CASE 0
+#endif
+
 int main(int argc, char **argv) {
+
+  assert(TEST_CASE >= 0 and TEST_CASE <= 2);
 
   MPI_Init(&argc, &argv);
   {
@@ -346,7 +459,7 @@ int main(int argc, char **argv) {
     int size = 0;
     MPI_Comm_size(com, &size);
 
-    assert(size == 4);
+    assert(size == 1 || size == 4);
 
     {
       // Initialize an instance:
@@ -366,10 +479,10 @@ int main(int argc, char **argv) {
       yac_cdef_comps_instance(instance_id, comp_names, n_comps, comp_ids);
 
       // Define grids:
-      ProjectedGrid input = source(rank);
+      ProjectedGrid input = source(rank, size, TEST_CASE);
       int input_grid_id = define_grid(input, "source");
 
-      ProjectedGrid output = target(rank);
+      ProjectedGrid output = target(rank, size, TEST_CASE);
       int output_grid_id = define_grid(output, "target");
 
       // Define fields:

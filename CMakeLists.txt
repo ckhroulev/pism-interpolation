@@ -48,11 +48,12 @@ pism_find_petsc()
 
 find_lib(YAC "yac>=3.0")
 find_lib(PISM "pism")
-find_lib(NETCDF "netcdf")
 find_lib(PROJ "proj>=6.0")
 
 add_executable(pism_interp main.cc)
-target_link_libraries(pism_interp MPI::MPI_C MPI::MPI_CXX PkgConfig::PETSC PkgConfig::PISM PkgConfig::YAC PkgConfig::NETCDF)
-
-add_executable(repro reproducer.cc)
-target_link_libraries(repro MPI::MPI_C MPI::MPI_CXX PkgConfig::YAC PkgConfig::NETCDF PkgConfig::PROJ)
+target_link_libraries(pism_interp
+  MPI::MPI_C
+  MPI::MPI_CXX
+  PkgConfig::PETSC
+  PkgConfig::PISM
+  PkgConfig::YAC)
