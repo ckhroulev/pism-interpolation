@@ -1,64 +1,51 @@
+#include <array> // std::array
 #include <cassert>
-#include <memory>
-#include <mpi.h>
-#include <pism/util/array/Array.hh>
-#include <string>
-#include <vector>
+#include <cmath> // M_PI
+#include <stdexcept> // std::runtime_error
+#include <string>    // std::string
+#include <vector>    // std::vector
 
-#include "pism/util/ConfigInterface.hh"
-#include "pism/util/Context.hh"
-#include "pism/util/Grid.hh"
-#include "pism/util/Logger.hh"
-#include "pism/util/Units.hh"
-#include "pism/util/array/Scalar.hh"
-#include "pism/util/error_handling.hh"
-#include "pism/util/io/File.hh"
-#include "pism/util/io/IO_Flags.hh"
-#include "pism/util/petscwrappers/PetscInitializer.hh"
-#include "pism/util/petscwrappers/Vec.hh"
-#include "pism/util/pism_options.hh"
-#include "pism/util/projection.hh"
+#include <mpi.h>
+
+#include <proj.h>
 
 extern "C" {
 #include "yac_interface.h"
 }
 
 /*!
- * Define a curvilinear Cartesian 2D grid on a sphere.
+ * Utility class converting `x,y` coordinates in a projection to a `lon,lat`
+ * pair.
  *
- * `grid_lon` and `grid_lat` should define cell vertices (cell bounds).
- *
- * `cell_lon` and `cell_lat` correspond to cell centers (for grids used
- * for conservative interpolation). Set to `nullptr` to define a grid
- * using cell vertices as the point set.
- *
- * All coordinates are in radians.
- *
- * Returns the point ID that can be used to define a "field".
+ * Requires the `PROJ` library.
  */
-static int define_grid(const char *grid_name, int n_vertices[2],
-                       double *grid_lon, double *grid_lat, int n_points[2],
-                       double *cell_lon, double *cell_lat, int *cell_global_index) {
+class LonLatCalculator {
+public:
+  LonLatCalculator(const std::string &spec) {
+    m_pj = proj_create_crs_to_crs(PJ_DEFAULT_CTX, spec.c_str(), "EPSG:4326", 0);
+    if (m_pj == 0) {
+      throw std::runtime_error(
+          "Failed to initialize projection transformation");
+    }
+  }
 
-  int cyclic[] = {0, 0};
-  int grid_id = 0;
+  ~LonLatCalculator() { proj_destroy(m_pj); }
 
-  yac_cdef_grid_curve2d(grid_name, n_vertices, cyclic, grid_lon, grid_lat,
-                        &grid_id);
+  std::array<double, 2> lonlat(double x, double y) const {
+    PJ_COORD in, out;
 
-  yac_cset_global_index(cell_global_index, YAC_LOCATION_CELL, grid_id);
+    in.xy = {x, y};
+    out = proj_trans(m_pj, PJ_FWD, in);
 
-  assert(n_points != nullptr and cell_lon != nullptr and cell_lat != nullptr);
+    return {out.lp.phi, out.lp.lam};
+  }
 
-  int point_id = 0;
-  yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, cell_lon,
-                          cell_lat, &point_id);
-
-  return point_id;
-}
+private:
+  PJ *m_pj;
+};
 
 /*!
- * Grid definition using coordinates in radians.
+ * Grid definition using lon,lat coordinates in radians.
  */
 struct LonLatGrid {
   std::vector<double> lon;
@@ -73,7 +60,7 @@ struct LonLatGrid {
    * The `projection` string has to use the format compatible with PROJ.
    */
   LonLatGrid(const std::vector<double> &x, const std::vector<double> &y,
-       const std::string &projection) {
+             const std::string &projection) {
 
     int nrow = y.size();
     int ncol = x.size();
@@ -82,13 +69,13 @@ struct LonLatGrid {
     lon.resize(N);
     lat.resize(N);
 
-    // convert from (row, col) to the linear index in "cell" arrays
+    // convert from (row, col) to the linear index lon and lat arrays below
     auto C = [ncol](int row, int col) { return row * ncol + col; };
 
     // convert from degrees to radians
     auto deg2rad = [](double degree) { return degree * M_PI / 180; };
 
-    pism::LonLatCalculator mapping(projection);
+    LonLatCalculator mapping(projection);
 
     for (int row = 0; row < nrow; ++row) {
       for (int col = 0; col < ncol; ++col) {
@@ -101,6 +88,11 @@ struct LonLatGrid {
   }
 };
 
+/*!
+ * A regular Cartesian grid in a projected coordinate system.
+ *
+ * Includes domain decomposition info.
+ */
 struct ProjectedGrid {
 
   // grid coordinates, in meters
@@ -121,7 +113,7 @@ struct ProjectedGrid {
   int ym;
 
   ProjectedGrid(const std::vector<double> &x_, const std::vector<double> &y_,
-           const std::string &projection_) {
+                const std::string &projection_) {
     x = x_;
     y = y_;
     projection = projection_;
@@ -137,30 +129,86 @@ struct ProjectedGrid {
     ys = ys_;
     ym = ym_;
   }
-
-  void report(const char* grid_name, int rank) {
-    printf("/*%s*/ case %d: result.set_decomposition(%d, %d, %d, %d); break;\n",
-           grid_name, rank, xs, xm, ys, ym);
-  }
 };
 
-ProjectedGrid source(int rank, const std::vector<double> &x,
-                const std::vector<double> &y, const std::string &projection) {
-  ProjectedGrid result(x, y, projection);
+// Creates an equally spaced 1D grid of size `N` starting at `start`
+// and using grid spacing `step`.
+std::vector<double> linspace(double start, double step, int N) {
+  std::vector<double> result(N);
+  for (int k = 0; k < N; ++k) {
+    result[k] = start + k * step;
+  }
+  return result;
+}
+
+/*!
+ * Define a curvilinear Cartesian 2D grid on a sphere.
+ *
+ * `grid_lon` and `grid_lat` should define cell vertices (cell bounds).
+ *
+ * `cell_lon` and `cell_lat` correspond to cell centers (for grids used
+ * for conservative interpolation). Set to `nullptr` to define a grid
+ * using cell vertices as the point set.
+ *
+ * All coordinates are in radians.
+ *
+ * Returns the point ID that can be used to define a "field".
+ */
+int define_grid(const char *grid_name, int n_vertices[2], double *grid_lon,
+                double *grid_lat, int n_points[2], double *cell_lon,
+                double *cell_lat, int *cell_global_index) {
+
+  int cyclic[] = {0, 0};
+  int grid_id = 0;
+
+  yac_cdef_grid_curve2d(grid_name, n_vertices, cyclic, grid_lon, grid_lat,
+                        &grid_id);
+
+  yac_cset_global_index(cell_global_index, YAC_LOCATION_CELL, grid_id);
+
+  assert(n_points != nullptr and cell_lon != nullptr and cell_lat != nullptr);
+
+  int point_id = 0;
+  yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, cell_lon,
+                          cell_lat, &point_id);
+
+  return point_id;
+}
+
+ProjectedGrid source(int rank) {
+  auto x = linspace(-678200, 900, 1760);
+  auto y = linspace(-3371150, 900, 3040);
+  const char *proj = "EPSG:3413";
+
+  ProjectedGrid result(x, y, proj);
 
   switch (rank) {
-  case 0: result.set_decomposition(0, 880, 0, 1520); break;
-  case 1: result.set_decomposition(880, 880, 0, 1520); break;
-  case 2: result.set_decomposition(0, 880, 1520, 1520); break;
-  case 3: result.set_decomposition(880, 880, 1520, 1520); break;
+  case 0:
+    result.set_decomposition(0, 880, 0, 1520);
+    break;
+  case 1:
+    result.set_decomposition(880, 880, 0, 1520);
+    break;
+  case 2:
+    result.set_decomposition(0, 880, 1520, 1520);
+    break;
+  case 3:
+    result.set_decomposition(880, 880, 1520, 1520);
+    break;
   }
 
   return result;
 }
 
-ProjectedGrid target(int rank, const std::vector<double> &x,
-                const std::vector<double> &y, const std::string &projection) {
-  ProjectedGrid result(x, y, projection);
+ProjectedGrid target(int rank) {
+
+  auto x = linspace(-800000, 5000, 301);
+  auto y = linspace(-3400000, 5000, 561);
+  const char *proj =
+      "+proj=stere +lat_0=90 +lat_ts=71 +lon_0=-39 +k=1 +x_0=0 +y_0=0 "
+      "+ellps=WGS84 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs";
+
+  ProjectedGrid result(x, y, proj);
 
   switch (rank) {
   case 0: result.set_decomposition(0, 301, 0, 141); break;
@@ -173,14 +221,11 @@ ProjectedGrid target(int rank, const std::vector<double> &x,
 }
 
 /*!
- * Define the PISM grid. Each PE defines its own subdomain.
+ * Define the a regular grid. Each PE defines its own subdomain.
+ *
+ * Returns the point ID that can be used to define a "field".
  */
-static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string &grid_name,
-                       const std::string &projection) {
-
-  ProjectedGrid info(grid->x(), grid->y(), projection);
-  info.set_decomposition(grid->xs(), grid->xm(), grid->ys(), grid->ym());
-  info.report(grid_name.c_str(), grid->rank());
+int define_grid(const ProjectedGrid &info, const std::string &grid_name) {
 
   std::vector<double> x(info.xm);
   std::vector<double> y(info.ym);
@@ -196,7 +241,7 @@ static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string
   }
 
   // Compute lon,lat coordinates of cell centers:
-  LonLatGrid cells(x, y, projection);
+  LonLatGrid cells(x, y, info.projection);
   int n_cells[2] = {(int)x.size(), (int)y.size()};
 
   // Shift x and y by half a grid spacing and add one more row and
@@ -219,7 +264,7 @@ static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string
   }
 
   // Compute lon,lat coordinates of cell corners:
-  LonLatGrid nodes(x, y, projection);
+  LonLatGrid nodes(x, y, info.projection);
   int n_nodes[2] = {(int)x.size(), (int)y.size()};
 
   std::vector<int> cell_global_index(n_cells[0] * n_cells[1]);
@@ -228,8 +273,8 @@ static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string
     int k = 0;
     for (int j = info.ys; j < info.ys + info.ym; ++j) {
       for (int i = info.xs; i < info.xs + info.xm; ++i) {
-      cell_global_index[k] = j * Mx + i;
-      ++k;
+        cell_global_index[k] = j * Mx + i;
+        ++k;
       }
     }
   }
@@ -241,6 +286,8 @@ static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string
 
 /*!
  * Define a "field" on a point set `point_id` in the component `comp_id`.
+ *
+ * Returns the field ID that can be used to define a "couple".
  */
 static int define_field(int comp_id, int point_id, const char *field_name) {
 
@@ -256,7 +303,12 @@ static int define_field(int comp_id, int point_id, const char *field_name) {
   return field_id;
 }
 
-static int define_interpolation(double missing_value) {
+/*!
+ * Define an interpolation stack.
+ *
+ * Returns the interpolation stack ID.
+ */
+int define_interpolation(double missing_value) {
   int id = 0;
   yac_cget_interp_stack_config(&id);
 
@@ -268,7 +320,8 @@ static int define_interpolation(double missing_value) {
   yac_cadd_interp_stack_config_conservative(
       id, order, enforce_conservation, partial_coverage, YAC_CONSERV_DESTAREA);
 
-  // average over source grid nodes containing a target point, weighted using barycentric
+  // average over source grid nodes containing a target point, weighted using
+  // barycentric
   yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
 
   // nearest neighbor
@@ -282,55 +335,18 @@ static int define_interpolation(double missing_value) {
   return id;
 }
 
-//! Get projection info from a NetCDF file. Returns a PROJ string.
-std::string projection(MPI_Comm com, const std::string &filename,
-                       pism::units::System::Ptr sys) {
-  pism::File input_file(com, filename, pism::io::PISM_GUESS,
-                        pism::io::PISM_READONLY);
-
-  return input_file.read_text_attribute("PISM_GLOBAL", "proj");
-}
-
 int main(int argc, char **argv) {
 
-  MPI_Comm com = MPI_COMM_WORLD;
-  pism::petsc::Initializer petsc(argc, argv, "");
+  MPI_Init(&argc, &argv);
+  {
+    MPI_Comm com = MPI_COMM_WORLD;
 
-  const char *source_proj = "epsg:3413";
-  const char *target_proj =
-      "+proj=stere +lat_0=90 +lat_ts=71 +lon_0=-39 +k=1 +x_0=0 +y_0=0 "
-      "+ellps=WGS84 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs";
+    int rank = 0;
+    MPI_Comm_rank(com, &rank);
+    int size = 0;
+    MPI_Comm_size(com, &size);
 
-  int exit_code = 0;
-  try {
-
-    auto ctx = pism::context_from_options(com, "");
-
-    auto config = ctx->config();
-
-    pism::options::String input("-input",
-                                "name of the file describing the input grid");
-
-    pism::options::String output_file("-o", "name of the output file");
-
-    pism::options::String output("-output",
-                                 "name of the file describing the output grid");
-
-    auto log = ctx->log();
-
-    auto input_grid = pism::Grid::FromFile(ctx, input, {"topg", "thk"},
-                                           pism::grid::CELL_CENTER);
-
-    log->message(2, "\nInput grid read from %s:\n", input->c_str());
-    input_grid->report_parameters();
-
-    auto output_grid = pism::Grid::FromFile(ctx, output, {"topg", "thk"},
-                                            pism::grid::CELL_CENTER);
-    log->message(2, "\nOutput grid read from %s:\n", output->c_str());
-    output_grid->report_parameters();
-
-    auto input_projection = projection(ctx->com(), input, ctx->unit_system());
-    auto output_projection = projection(ctx->com(), output, ctx->unit_system());
+    assert(size == 4);
 
     {
       // Initialize an instance:
@@ -350,9 +366,11 @@ int main(int argc, char **argv) {
       yac_cdef_comps_instance(instance_id, comp_names, n_comps, comp_ids);
 
       // Define grids:
-      int input_grid_id = define_grid(input_grid, "source", input_projection);
-      int output_grid_id =
-          define_grid(output_grid, "target", output_projection);
+      ProjectedGrid input = source(rank);
+      int input_grid_id = define_grid(input, "source");
+
+      ProjectedGrid output = target(rank);
+      int output_grid_id = define_grid(output, "target");
 
       // Define fields:
       int source_field = define_field(comp_ids[0], input_grid_id, "source");
@@ -369,69 +387,47 @@ int main(int argc, char **argv) {
       const char *weight_file_name = nullptr;
       yac_cdef_couple_instance(
           instance_id,
-          "input",         // input component name
+          "input",                 // input component name
           "source",                // input grid name
           "source",                // input field name
-          "output",         // target component name
+          "output",                // target component name
           "target",                // target grid name
           "target",                // target field name
           "1",                     // time step length in units below
           YAC_TIME_UNIT_SECOND,    // time step length units
           YAC_REDUCTION_TIME_NONE, // reduction in time (for asynchronous
                                    // coupling)
-          interp_stack_id, src_lag, tgt_lag,
-          weight_file_name,
-          mapping_side);
+          interp_stack_id, src_lag, tgt_lag, weight_file_name, mapping_side);
 
       // free the interpolation stack config now that we defined the coupling
       yac_cfree_interp_stack_config(interp_stack_id);
 
-      double start = 0;
-      double end = 0;
-
-      log->message(2, "Initializing interpolation... ");
-      start = MPI_Wtime();
       yac_cenddef_instance(instance_id);
-      end = MPI_Wtime();
-      log->message(2, "done in %f seconds.\n", end - start);
 
       int collection_size = 1;
       int ierror = 0;
       {
-        pism::array::Scalar input_field(input_grid, "topg");
-        input_field.metadata().units("m").standard_name("bedrock_altitude");
-        input_field.regrid(input, pism::io::CRITICAL);
+        std::vector<double> input_array(input.xm * input.ym);
+        // the contents of input_array don't matter
 
-        pism::petsc::VecArray array(input_field.vec());
-
-        double *send_field_[1] = {array.get()};
+        double *send_field_[1] = {input_array.data()};
         double **send_field[1] = {&send_field_[0]};
         int info;
-        start = MPI_Wtime();
         yac_cput(source_field, collection_size, send_field, &info, &ierror);
       }
-      {
-        pism::array::Scalar output(output_grid, "bed_topography");
-        output.metadata().units("m").standard_name("bedrock_altitude");
-        output.metadata()["_FillValue"] = {fill_value};
-        pism::petsc::VecArray array(output.vec());
 
-        double *recv_field[1] = {array.get()};
+      {
+        std::vector<double> output_array(output.xm * output.ym);
+
+        double *recv_field[1] = {output_array.data()};
         int info;
         yac_cget(target_field, collection_size, recv_field, &info, &ierror);
-        end = MPI_Wtime();
-        output.dump(output_file->c_str());
       }
-
-      log->message(2, "Data transfer took %f seconds.\n", end - start);
 
       yac_ccleanup_instance(instance_id);
     }
-
-  } catch (...) {
-    pism::handle_fatal_errors(com);
-    exit_code = 1;
   }
+  MPI_Finalize();
 
-  return exit_code;
+  return 0;
 }
