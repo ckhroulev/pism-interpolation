@@ -334,12 +334,11 @@ int main(int argc, char **argv) {
 
     {
       // Initialize an instance:
-      int instance_id = 0;
       {
-        yac_cinit_instance(&instance_id);
+        yac_cinit();
         yac_cdef_calendar(YAC_PROLEPTIC_GREGORIAN);
         // Note: zero-padding of months and days *is* required.
-        yac_cdef_datetime_instance(instance_id, "-1-01-01", "+1-01-01");
+        yac_cdef_datetime("-1-01-01", "+1-01-01");
       }
 
       // Define components: this has to be done using *one* call
@@ -347,7 +346,7 @@ int main(int argc, char **argv) {
       const int n_comps = 2;
       const char *comp_names[n_comps] = {"input", "output"};
       int comp_ids[n_comps] = {0, 0};
-      yac_cdef_comps_instance(instance_id, comp_names, n_comps, comp_ids);
+      yac_cdef_comps(comp_names, n_comps, comp_ids);
 
       // Define grids:
       int input_grid_id = define_grid(input_grid, "source", input_projection);
@@ -365,23 +364,19 @@ int main(int argc, char **argv) {
       // Define the coupling between fields:
       const int src_lag = 0;
       const int tgt_lag = 0;
-      const int mapping_side = 1; // 1 means "mapping on source"
-      const char *weight_file_name = nullptr;
-      yac_cdef_couple_instance(
-          instance_id,
-          "input",         // input component name
-          "source",                // input grid name
-          "source",                // input field name
-          "output",         // target component name
-          "target",                // target grid name
-          "target",                // target field name
-          "1",                     // time step length in units below
-          YAC_TIME_UNIT_SECOND,    // time step length units
-          YAC_REDUCTION_TIME_NONE, // reduction in time (for asynchronous
-                                   // coupling)
-          interp_stack_id, src_lag, tgt_lag,
-          weight_file_name,
-          mapping_side);
+      yac_cdef_couple("input",              // input component name
+                      "source",             // input grid name
+                      "source",             // input field name
+                      "output",             // target component name
+                      "target",             // target grid name
+                      "target",             // target field name
+                      "1",                  // time step length in units below
+                      YAC_TIME_UNIT_SECOND, // time step length units
+                      YAC_REDUCTION_TIME_NONE, // reduction in time (for
+                                               // asynchronous coupling)
+                      interp_stack_id,
+                      src_lag,
+                      tgt_lag);
 
       // free the interpolation stack config now that we defined the coupling
       yac_cfree_interp_stack_config(interp_stack_id);
@@ -391,7 +386,7 @@ int main(int argc, char **argv) {
 
       log->message(2, "Initializing interpolation... ");
       start = MPI_Wtime();
-      yac_cenddef_instance(instance_id);
+      yac_cenddef();
       end = MPI_Wtime();
       log->message(2, "done in %f seconds.\n", end - start);
 
@@ -425,7 +420,7 @@ int main(int argc, char **argv) {
 
       log->message(2, "Data transfer took %f seconds.\n", end - start);
 
-      yac_ccleanup_instance(instance_id);
+      yac_cfinalize();
     }
 
   } catch (...) {

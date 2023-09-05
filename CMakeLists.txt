@@ -46,7 +46,7 @@ endmacro()
 
 pism_find_petsc()
 
-find_lib(YAC "yac>=3.0")
+find_lib(YAC "yac>=3.0.2")
 find_lib(PISM "pism")
 find_lib(PROJ "proj>=6.0")
 
