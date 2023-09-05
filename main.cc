@@ -216,7 +216,7 @@ static int interpolation_fine_to_coarse(double missing_value) {
       id, order, enforce_conservation, partial_coverage, YAC_CONSERV_DESTAREA);
 
   // average over source grid nodes containing a target point, weighted using
-  // barycentric
+  // barycentric local coordinates
   yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
 
   // nearest neighbor
@@ -237,7 +237,7 @@ static int interpolation_coarse_to_fine(double missing_value) {
   int partial_coverage = 0;
 
   // average over source grid nodes containing a target point, weighted using
-  // barycentric
+  // barycentric local coordinates
   yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
 
   // nearest neighbor
