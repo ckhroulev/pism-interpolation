@@ -174,6 +174,7 @@ static int define_grid(std::shared_ptr<const pism::Grid> grid,
     int cyclic[] = {0, 0};
 
     int grid_id = 0;
+
     yac_cdef_grid_curve2d(grid_name.c_str(), n_nodes, cyclic, nodes.lon.data(),
                           nodes.lat.data(), &grid_id);
 
@@ -366,8 +367,8 @@ int main(int argc, char **argv) {
 
         pism::petsc::VecArray array(input_field.vec());
 
-        double *send_field_[1] = {array.get()};
-        double **send_field[1] = {&send_field_[0]};
+        double *send_field_ = array.get();
+        double **send_field[1] = {&send_field_};
         int info;
         start = MPI_Wtime();
         yac_cput(source_field, collection_size, send_field, &info, &ierror);
