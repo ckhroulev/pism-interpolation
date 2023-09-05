@@ -360,31 +360,33 @@ int main(int argc, char **argv) {
 
       int collection_size = 1;
       int ierror = 0;
+
+      pism::array::Scalar input_field(input_grid, "topg");
+      input_field.metadata().units("m").standard_name("bedrock_altitude");
+      input_field.regrid(input, pism::io::CRITICAL);
+
+      pism::array::Scalar output(output_grid, "topg");
+      output.metadata().units("m").standard_name("bedrock_altitude");
+      output.metadata()["_FillValue"] = {fill_value};
       {
-        pism::array::Scalar input_field(input_grid, "topg");
-        input_field.metadata().units("m").standard_name("bedrock_altitude");
-        input_field.regrid(input, pism::io::CRITICAL);
+        int send_info = 0;
+        int recv_info = 0;
 
-        pism::petsc::VecArray array(input_field.vec());
+        pism::petsc::VecArray input_array(input_field.vec());
+        pism::petsc::VecArray output_array(output.vec());
 
-        double *send_field_ = array.get();
+        double *send_field_ = input_array.get();
         double **send_field[1] = {&send_field_};
-        int info;
-        start = MPI_Wtime();
-        yac_cput(source_field, collection_size, send_field, &info, &ierror);
-      }
-      {
-        pism::array::Scalar output(output_grid, "topg");
-        output.metadata().units("m").standard_name("bedrock_altitude");
-        output.metadata()["_FillValue"] = {fill_value};
-        pism::petsc::VecArray array(output.vec());
 
-        double *recv_field[1] = {array.get()};
-        int info;
-        yac_cget(target_field, collection_size, recv_field, &info, &ierror);
+        double *recv_field[1] = {output_array.get()};
+
+        start = MPI_Wtime();
+        yac_cexchange(source_field, target_field, collection_size, send_field,
+                      recv_field, &send_info, &recv_info, &ierror);
         end = MPI_Wtime();
-        output.dump(output_file->c_str());
       }
+
+      output.dump(output_file->c_str());
 
       log->message(2, "Data transfer took %f seconds.\n", end - start);
 
