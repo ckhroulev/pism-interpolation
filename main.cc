@@ -24,40 +24,6 @@ extern "C" {
 }
 
 /*!
- * Define a curvilinear Cartesian 2D grid on a sphere.
- *
- * `grid_lon` and `grid_lat` should define cell vertices (cell bounds).
- *
- * `cell_lon` and `cell_lat` correspond to cell centers (for grids used
- * for conservative interpolation). Set to `nullptr` to define a grid
- * using cell vertices as the point set.
- *
- * All coordinates are in radians.
- *
- * Returns the point ID that can be used to define a "field".
- */
-static int define_grid(const char *grid_name, int n_vertices[2],
-                       double *grid_lon, double *grid_lat, int n_points[2],
-                       double *cell_lon, double *cell_lat, int *cell_global_index) {
-
-  int cyclic[] = {0, 0};
-  int grid_id = 0;
-
-  yac_cdef_grid_curve2d(grid_name, n_vertices, cyclic, grid_lon, grid_lat,
-                        &grid_id);
-
-  yac_cset_global_index(cell_global_index, YAC_LOCATION_CELL, grid_id);
-
-  assert(n_points != nullptr and cell_lon != nullptr and cell_lat != nullptr);
-
-  int point_id = 0;
-  yac_cdef_points_curve2d(grid_id, n_points, YAC_LOCATION_CELL, cell_lon,
-                          cell_lat, &point_id);
-
-  return point_id;
-}
-
-/*!
  * Grid definition using coordinates in radians.
  */
 struct LonLatGrid {
@@ -73,7 +39,7 @@ struct LonLatGrid {
    * The `projection` string has to use the format compatible with PROJ.
    */
   LonLatGrid(const std::vector<double> &x, const std::vector<double> &y,
-       const std::string &projection) {
+             const std::string &projection) {
 
     int nrow = y.size();
     int ncol = x.size();
@@ -121,7 +87,7 @@ struct ProjectedGrid {
   int ym;
 
   ProjectedGrid(const std::vector<double> &x_, const std::vector<double> &y_,
-           const std::string &projection_) {
+                const std::string &projection_) {
     x = x_;
     y = y_;
     projection = projection_;
@@ -137,50 +103,19 @@ struct ProjectedGrid {
     ys = ys_;
     ym = ym_;
   }
-
-  void report(const char* grid_name, int rank) {
-    printf("/*%s*/ case %d: result.set_decomposition(%d, %d, %d, %d); break;\n",
-           grid_name, rank, xs, xm, ys, ym);
-  }
 };
-
-ProjectedGrid source(int rank, const std::vector<double> &x,
-                const std::vector<double> &y, const std::string &projection) {
-  ProjectedGrid result(x, y, projection);
-
-  switch (rank) {
-  case 0: result.set_decomposition(0, 880, 0, 1520); break;
-  case 1: result.set_decomposition(880, 880, 0, 1520); break;
-  case 2: result.set_decomposition(0, 880, 1520, 1520); break;
-  case 3: result.set_decomposition(880, 880, 1520, 1520); break;
-  }
-
-  return result;
-}
-
-ProjectedGrid target(int rank, const std::vector<double> &x,
-                const std::vector<double> &y, const std::string &projection) {
-  ProjectedGrid result(x, y, projection);
-
-  switch (rank) {
-  case 0: result.set_decomposition(0, 301, 0, 141); break;
-  case 1: result.set_decomposition(0, 301, 141, 140); break;
-  case 2: result.set_decomposition(0, 301, 281, 140); break;
-  case 3: result.set_decomposition(0, 301, 421, 140); break;
-  }
-
-  return result;
-}
 
 /*!
  * Define the PISM grid. Each PE defines its own subdomain.
+ *
+ * Returns the point ID that can be used to define a "field".
  */
-static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string &grid_name,
+static int define_grid(std::shared_ptr<const pism::Grid> grid,
+                       const std::string &grid_name,
                        const std::string &projection) {
 
   ProjectedGrid info(grid->x(), grid->y(), projection);
   info.set_decomposition(grid->xs(), grid->xm(), grid->ys(), grid->ym());
-  info.report(grid_name.c_str(), grid->rank());
 
   std::vector<double> x(info.xm);
   std::vector<double> y(info.ym);
@@ -228,15 +163,26 @@ static int define_grid(std::shared_ptr<const pism::Grid> grid, const std::string
     int k = 0;
     for (int j = info.ys; j < info.ys + info.ym; ++j) {
       for (int i = info.xs; i < info.xs + info.xm; ++i) {
-      cell_global_index[k] = j * Mx + i;
-      ++k;
+        cell_global_index[k] = j * Mx + i;
+        ++k;
       }
     }
   }
 
-  return define_grid(grid_name.c_str(), n_nodes, nodes.lon.data(),
-                     nodes.lat.data(), n_cells, cells.lon.data(),
-                     cells.lat.data(), cell_global_index.data());
+  int point_id = 0;
+  {
+    int cyclic[] = {0, 0};
+
+    int grid_id = 0;
+    yac_cdef_grid_curve2d(grid_name.c_str(), n_nodes, cyclic, nodes.lon.data(),
+                          nodes.lat.data(), &grid_id);
+
+    yac_cset_global_index(cell_global_index.data(), YAC_LOCATION_CELL, grid_id);
+
+    yac_cdef_points_curve2d(grid_id, n_cells, YAC_LOCATION_CELL,
+                            cells.lon.data(), cells.lat.data(), &point_id);
+  }
+  return point_id;
 }
 
 /*!
@@ -256,7 +202,7 @@ static int define_field(int comp_id, int point_id, const char *field_name) {
   return field_id;
 }
 
-static int define_interpolation(double missing_value) {
+static int interpolation_fine_to_coarse(double missing_value) {
   int id = 0;
   yac_cget_interp_stack_config(&id);
 
@@ -268,7 +214,29 @@ static int define_interpolation(double missing_value) {
   yac_cadd_interp_stack_config_conservative(
       id, order, enforce_conservation, partial_coverage, YAC_CONSERV_DESTAREA);
 
-  // average over source grid nodes containing a target point, weighted using barycentric
+  // average over source grid nodes containing a target point, weighted using
+  // barycentric
+  yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
+
+  // nearest neighbor
+  int n_neighbors = 1;
+  double scaling = 1.0;
+  yac_cadd_interp_stack_config_nnn(id, YAC_NNN_DIST, n_neighbors, scaling);
+
+  // constant if all of the above failed
+  yac_cadd_interp_stack_config_fixed(id, missing_value);
+
+  return id;
+}
+
+static int interpolation_coarse_to_fine(double missing_value) {
+  int id = 0;
+  yac_cget_interp_stack_config(&id);
+
+  int partial_coverage = 0;
+
+  // average over source grid nodes containing a target point, weighted using
+  // barycentric
   yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
 
   // nearest neighbor
@@ -295,11 +263,6 @@ int main(int argc, char **argv) {
 
   MPI_Comm com = MPI_COMM_WORLD;
   pism::petsc::Initializer petsc(argc, argv, "");
-
-  const char *source_proj = "epsg:3413";
-  const char *target_proj =
-      "+proj=stere +lat_0=90 +lat_ts=71 +lon_0=-39 +k=1 +x_0=0 +y_0=0 "
-      "+ellps=WGS84 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs";
 
   int exit_code = 0;
   try {
@@ -359,7 +322,13 @@ int main(int argc, char **argv) {
 
       // Define the interpolation stack:
       double fill_value = -99999;
-      int interp_stack_id = define_interpolation(fill_value);
+      int interp_stack_id = 0;
+      if (input_grid->dx() < output_grid->dx() or
+          input_grid->dy() < output_grid->dy()) {
+        interp_stack_id = interpolation_fine_to_coarse(fill_value);
+      } else {
+        interp_stack_id = interpolation_coarse_to_fine(fill_value);
+      }
 
       // Define the coupling between fields:
       const int src_lag = 0;
@@ -374,9 +343,7 @@ int main(int argc, char **argv) {
                       YAC_TIME_UNIT_SECOND, // time step length units
                       YAC_REDUCTION_TIME_NONE, // reduction in time (for
                                                // asynchronous coupling)
-                      interp_stack_id,
-                      src_lag,
-                      tgt_lag);
+                      interp_stack_id, src_lag, tgt_lag);
 
       // free the interpolation stack config now that we defined the coupling
       yac_cfree_interp_stack_config(interp_stack_id);
@@ -406,7 +373,7 @@ int main(int argc, char **argv) {
         yac_cput(source_field, collection_size, send_field, &info, &ierror);
       }
       {
-        pism::array::Scalar output(output_grid, "bed_topography");
+        pism::array::Scalar output(output_grid, "topg");
         output.metadata().units("m").standard_name("bedrock_altitude");
         output.metadata()["_FillValue"] = {fill_value};
         pism::petsc::VecArray array(output.vec());
