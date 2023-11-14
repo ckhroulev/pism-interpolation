@@ -8,8 +8,8 @@ prefix=$HOME/local/dkrz
 
 build_yaxt () {
 
-git clone -b release-0.10.0 https://gitlab.dkrz.de/dkrz-sw/yaxt.git || (cd yaxt && git pull)
-
+rm -rf yaxt
+git clone -b release-0.10.0 https://gitlab.dkrz.de/dkrz-sw/yaxt.git
 pushd yaxt
 
 autoreconf -i
@@ -24,8 +24,8 @@ popd
 
 build_yac () {
 
-git clone -b release-3.0.2_p1 https://gitlab.dkrz.de/dkrz-sw/yac.git || (cd yac && git pull)
-
+rm -rf yac
+git clone -b release-3.0.3_p1 https://gitlab.dkrz.de/dkrz-sw/yac.git
 pushd yac
 
 autoreconf -i
