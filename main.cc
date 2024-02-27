@@ -278,6 +278,33 @@ pism::MappingInfo mapping(MPI_Comm com, const std::string &filename,
   return result;
 }
 
+/*!
+ * Return the string that describes a 2D grid present in a NetCDF file.
+ *
+ * Here `variable_name` is the name of a 2D variable used to extract
+ * grid information.
+ *
+ * We assume that a file may contain more than one grid, so the file
+ * name alone is not sufficient.
+ *
+ * The output has the form "input_file.nc:y:x".
+ */
+std::string grid_name(pism::File &file, const std::string &variable_name,
+                      pism::units::System::Ptr sys) {
+  auto dims = file.dimensions(variable_name);
+
+  std::string result = file.filename();
+  for (const auto &d : dims) {
+    auto type = file.dimension_type(d, sys);
+
+    if (type == pism::X_AXIS or type == pism::Y_AXIS) {
+      result += ":";
+      result += d;
+    }
+  }
+  return result;
+}
+
 static double interpolate(int source_field_id, const pism::array::Scalar &source,
                           int target_field_id, pism::array::Scalar &target) {
 
@@ -315,33 +342,51 @@ int main(int argc, char **argv) {
 
     auto config = ctx->config();
 
-    pism::options::String input("-input",
-                                "name of the file describing the input grid");
+    pism::options::String input_filename(
+        "-input", "name of the file describing the input grid");
 
-    pism::options::String output_file("-o", "name of the output file");
+    pism::options::String output_filename("-o", "name of the output file");
 
-    pism::options::String output("-output",
-                                 "name of the file describing the output grid");
+    pism::options::String output_grid_filename(
+        "-output", "name of the file describing the output grid");
 
     auto log = ctx->log();
 
-    auto input_grid = pism::Grid::FromFile(ctx, input, {"topg", "thk"},
+    auto input_grid = pism::Grid::FromFile(ctx, input_filename, {"topg"},
                                            pism::grid::CELL_CENTER);
-    input_grid->set_mapping_info(mapping(ctx->com(), input, ctx->unit_system()));
 
-    log->message(2, "\nInput grid read from %s:\n", input->c_str());
+    std::string input_grid_name;
+    {
+      pism::File input_file(ctx->com(), input_filename, pism::io::PISM_GUESS,
+                            pism::io::PISM_READONLY);
+
+      input_grid_name = grid_name(input_file, "topg", ctx->unit_system());
+    }
+
+    input_grid->set_mapping_info(mapping(ctx->com(), input_filename, ctx->unit_system()));
+
+    log->message(2, "\nInput grid %s\n", input_grid_name.c_str());
     input_grid->report_parameters();
 
-    auto output_grid = pism::Grid::FromFile(ctx, output, {"topg", "thk"},
+    auto output_grid = pism::Grid::FromFile(ctx, output_grid_filename, {"topg"},
                                             pism::grid::CELL_CENTER);
-    output_grid->set_mapping_info(mapping(ctx->com(), output, ctx->unit_system()));
 
-    log->message(2, "\nOutput grid read from %s:\n", output->c_str());
+    std::string output_grid_name;
+    {
+      pism::File output_file(ctx->com(), output_grid_filename, pism::io::PISM_GUESS,
+                            pism::io::PISM_READONLY);
+
+      output_grid_name = grid_name(output_file, "topg", ctx->unit_system());
+    }
+
+    output_grid->set_mapping_info(mapping(ctx->com(), output_grid_filename, ctx->unit_system()));
+
+    log->message(2, "\nOutput grid %s\n", output_grid_name.c_str());
     output_grid->report_parameters();
 
     pism::array::Scalar source(input_grid, "topg");
     source.metadata().units("m").standard_name("bedrock_altitude");
-    source.regrid(input, pism::io::Default::Nil());
+    source.regrid(input_filename, pism::io::Default::Nil());
 
     pism::array::Scalar target(output_grid, "topg");
     target.metadata().units("m").standard_name("bedrock_altitude");
@@ -381,9 +426,9 @@ int main(int argc, char **argv) {
         // Define the coupling between fields:
         const int src_lag = 0;
         const int tgt_lag = 0;
-        yac_cdef_couple("input",              // input component name
-                        "source",             // input grid name
-                        "source",             // input field name
+        yac_cdef_couple("input",              // source component name
+                        "source",             // source grid name
+                        "source",             // source field name
                         "output",             // target component name
                         "target",             // target grid name
                         "target",             // target field name
@@ -410,7 +455,7 @@ int main(int argc, char **argv) {
 
       log->message(2, "Data transfer took %f seconds.\n", time_spent);
 
-      target.dump(output_file->c_str());
+      target.dump(output_filename->c_str());
 
       yac_cfinalize();
     }
