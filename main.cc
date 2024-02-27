@@ -110,12 +110,11 @@ struct ProjectedGrid {
  *
  * Returns the point ID that can be used to define a "field".
  */
-static int define_grid(std::shared_ptr<const pism::Grid> grid,
-                       const std::string &grid_name,
+static int define_grid(const pism::Grid &grid, const std::string &grid_name,
                        const std::string &projection) {
 
-  ProjectedGrid info(grid->x(), grid->y(), projection);
-  info.set_decomposition(grid->xs(), grid->xm(), grid->ys(), grid->ym());
+  ProjectedGrid info(grid.x(), grid.y(), projection);
+  info.set_decomposition(grid.xs(), grid.xm(), grid.ys(), grid.ym());
 
   std::vector<double> x(info.xm);
   std::vector<double> y(info.ym);
@@ -203,6 +202,22 @@ static int define_field(int comp_id, int point_id, const char *field_name) {
   return field_id;
 }
 
+/*!
+ * Return the YAC field_id corresponding to a given grid and projection.
+ *
+ * @param[in] component_id YAC component ID
+ * @param[in] pism_grid PISM's grid
+ * @param[in] projection PROJ string defining the projection
+ * @param[in] name string describing this grid and field
+ */
+static int define_field(int component_id, const pism::Grid &pism_grid,
+                        const std::string &name) {
+  return define_field(
+      component_id,
+      define_grid(pism_grid, name, pism_grid.get_mapping_info().proj),
+      name.c_str());
+}
+
 static int interpolation_fine_to_coarse(double missing_value) {
   int id = 0;
   yac_cget_interp_stack_config(&id);
@@ -251,17 +266,20 @@ static int interpolation_coarse_to_fine(double missing_value) {
   return id;
 }
 
-//! Get projection info from a NetCDF file. Returns a PROJ string.
-std::string projection(MPI_Comm com, const std::string &filename,
-                       pism::units::System::Ptr sys) {
+//! Get projection info from a NetCDF file.
+pism::MappingInfo mapping(MPI_Comm com, const std::string &filename,
+                          pism::units::System::Ptr sys) {
   pism::File input_file(com, filename, pism::io::PISM_GUESS,
                         pism::io::PISM_READONLY);
 
-  return input_file.read_text_attribute("PISM_GLOBAL", "proj");
+  pism::MappingInfo result("mapping", sys);
+  result.proj = input_file.read_text_attribute("PISM_GLOBAL", "proj");
+
+  return result;
 }
 
-static double interpolate(int source_field, const pism::array::Scalar &source,
-                          int target_field, pism::array::Scalar &target) {
+static double interpolate(int source_field_id, const pism::array::Scalar &source,
+                          int target_field_id, pism::array::Scalar &target) {
 
   pism::petsc::VecArray input_array(source.vec());
   pism::petsc::VecArray output_array(target.vec());
@@ -276,7 +294,7 @@ static double interpolate(int source_field, const pism::array::Scalar &source,
   int recv_info = 0;
   int collection_size = 1;
   double start = MPI_Wtime();
-  yac_cexchange(source_field, target_field, collection_size, send_field,
+  yac_cexchange(source_field_id, target_field_id, collection_size, send_field,
                 recv_field, &send_info, &recv_info, &ierror);
   double end = MPI_Wtime();
 
@@ -287,6 +305,8 @@ int main(int argc, char **argv) {
 
   MPI_Comm com = MPI_COMM_WORLD;
   pism::petsc::Initializer petsc(argc, argv, "");
+
+  double fill_value = -99999;
 
   int exit_code = 0;
   try {
@@ -307,20 +327,28 @@ int main(int argc, char **argv) {
 
     auto input_grid = pism::Grid::FromFile(ctx, input, {"topg", "thk"},
                                            pism::grid::CELL_CENTER);
+    input_grid->set_mapping_info(mapping(ctx->com(), input, ctx->unit_system()));
 
     log->message(2, "\nInput grid read from %s:\n", input->c_str());
     input_grid->report_parameters();
 
     auto output_grid = pism::Grid::FromFile(ctx, output, {"topg", "thk"},
                                             pism::grid::CELL_CENTER);
+    output_grid->set_mapping_info(mapping(ctx->com(), output, ctx->unit_system()));
+
     log->message(2, "\nOutput grid read from %s:\n", output->c_str());
     output_grid->report_parameters();
 
-    auto input_projection = projection(ctx->com(), input, ctx->unit_system());
-    auto output_projection = projection(ctx->com(), output, ctx->unit_system());
+    pism::array::Scalar source(input_grid, "topg");
+    source.metadata().units("m").standard_name("bedrock_altitude");
+    source.regrid(input, pism::io::Default::Nil());
+
+    pism::array::Scalar target(output_grid, "topg");
+    target.metadata().units("m").standard_name("bedrock_altitude");
+    target.metadata()["_FillValue"] = {fill_value};
 
     {
-      // Initialize an instance:
+      // Initialize YAC:
       {
         yac_cinit();
         yac_cdef_calendar(YAC_PROLEPTIC_GREGORIAN);
@@ -335,68 +363,54 @@ int main(int argc, char **argv) {
       int comp_ids[n_comps] = {0, 0};
       yac_cdef_comps(comp_names, n_comps, comp_ids);
 
-      // Define grids:
-      int input_grid_id = define_grid(input_grid, "source", input_projection);
-      int output_grid_id =
-          define_grid(output_grid, "target", output_projection);
-
-      // Define fields:
-      int source_field = define_field(comp_ids[0], input_grid_id, "source");
-      int target_field = define_field(comp_ids[1], output_grid_id, "target");
+      int source_field_id =
+          define_field(comp_ids[0], *input_grid, "source");
+      int target_field_id =
+          define_field(comp_ids[1], *output_grid, "target");
 
       // Define the interpolation stack:
-      double fill_value = -99999;
-      int interp_stack_id = 0;
-      if (input_grid->dx() < output_grid->dx() or
-          input_grid->dy() < output_grid->dy()) {
-        interp_stack_id = interpolation_fine_to_coarse(fill_value);
-      } else {
-        interp_stack_id = interpolation_coarse_to_fine(fill_value);
+      {
+        int interp_stack_id = 0;
+        if (input_grid->dx() < output_grid->dx() or
+            input_grid->dy() < output_grid->dy()) {
+          interp_stack_id = interpolation_fine_to_coarse(fill_value);
+        } else {
+          interp_stack_id = interpolation_coarse_to_fine(fill_value);
+        }
+
+        // Define the coupling between fields:
+        const int src_lag = 0;
+        const int tgt_lag = 0;
+        yac_cdef_couple("input",              // input component name
+                        "source",             // input grid name
+                        "source",             // input field name
+                        "output",             // target component name
+                        "target",             // target grid name
+                        "target",             // target field name
+                        "1",                  // time step length in units below
+                        YAC_TIME_UNIT_SECOND, // time step length units
+                        YAC_REDUCTION_TIME_NONE, // reduction in time (for
+                                                 // asynchronous coupling)
+                        interp_stack_id, src_lag, tgt_lag);
+
+        // free the interpolation stack config now that we defined the coupling
+        yac_cfree_interp_stack_config(interp_stack_id);
       }
 
-      // Define the coupling between fields:
-      const int src_lag = 0;
-      const int tgt_lag = 0;
-      yac_cdef_couple("input",              // input component name
-                      "source",             // input grid name
-                      "source",             // input field name
-                      "output",             // target component name
-                      "target",             // target grid name
-                      "target",             // target field name
-                      "1",                  // time step length in units below
-                      YAC_TIME_UNIT_SECOND, // time step length units
-                      YAC_REDUCTION_TIME_NONE, // reduction in time (for
-                                               // asynchronous coupling)
-                      interp_stack_id, src_lag, tgt_lag);
-
-      // free the interpolation stack config now that we defined the coupling
-      yac_cfree_interp_stack_config(interp_stack_id);
-
-      double start = 0;
-      double end = 0;
-
       log->message(2, "Initializing interpolation... ");
-      start = MPI_Wtime();
+      double start = MPI_Wtime();
       yac_cenddef();
-      end = MPI_Wtime();
+      double end = MPI_Wtime();
       log->message(2, "done in %f seconds.\n", end - start);
 
       int collection_size = 1;
       int ierror = 0;
 
-      pism::array::Scalar input_field(input_grid, "topg");
-      input_field.metadata().units("m").standard_name("bedrock_altitude");
-      input_field.regrid(input, pism::io::Default::Nil());
-
-      pism::array::Scalar output(output_grid, "topg");
-      output.metadata().units("m").standard_name("bedrock_altitude");
-      output.metadata()["_FillValue"] = {fill_value};
-
-      double time_spent = interpolate(source_field, input_field, target_field, output);
+      double time_spent = interpolate(source_field_id, source, target_field_id, target);
 
       log->message(2, "Data transfer took %f seconds.\n", time_spent);
 
-      output.dump(output_file->c_str());
+      target.dump(output_file->c_str());
 
       yac_cfinalize();
     }
