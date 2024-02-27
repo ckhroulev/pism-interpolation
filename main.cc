@@ -363,7 +363,7 @@ int main(int argc, char **argv) {
 
       pism::array::Scalar input_field(input_grid, "topg");
       input_field.metadata().units("m").standard_name("bedrock_altitude");
-      input_field.regrid(input, pism::io::CRITICAL);
+      input_field.regrid(input, pism::io::Default::Nil());
 
       pism::array::Scalar output(output_grid, "topg");
       output.metadata().units("m").standard_name("bedrock_altitude");
