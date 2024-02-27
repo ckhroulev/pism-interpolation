@@ -289,12 +289,10 @@ pism::MappingInfo mapping(MPI_Comm com, const std::string &filename,
  *
  * The output has the form "input_file.nc:y:x".
  */
-std::string grid_name(pism::File &file, const std::string &variable_name,
-                      pism::units::System::Ptr sys) {
-  auto dims = file.dimensions(variable_name);
-
+static std::string grid_name(pism::File &file, const std::string &variable_name,
+                             pism::units::System::Ptr sys) {
   std::string result = file.filename();
-  for (const auto &d : dims) {
+  for (const auto &d : file.dimensions(variable_name)) {
     auto type = file.dimension_type(d, sys);
 
     if (type == pism::X_AXIS or type == pism::Y_AXIS) {
@@ -365,7 +363,7 @@ int main(int argc, char **argv) {
 
     input_grid->set_mapping_info(mapping(ctx->com(), input_filename, ctx->unit_system()));
 
-    log->message(2, "\nInput grid %s\n", input_grid_name.c_str());
+    log->message(2, "\nInput: %s\n", input_grid_name.c_str());
     input_grid->report_parameters();
 
     auto output_grid = pism::Grid::FromFile(ctx, output_grid_filename, {"topg"},
@@ -381,7 +379,7 @@ int main(int argc, char **argv) {
 
     output_grid->set_mapping_info(mapping(ctx->com(), output_grid_filename, ctx->unit_system()));
 
-    log->message(2, "\nOutput grid %s\n", output_grid_name.c_str());
+    log->message(2, "\nOutput: %s\n", output_grid_name.c_str());
     output_grid->report_parameters();
 
     pism::array::Scalar source(input_grid, "topg");
@@ -409,9 +407,9 @@ int main(int argc, char **argv) {
       yac_cdef_comps(comp_names, n_comps, comp_ids);
 
       int source_field_id =
-          define_field(comp_ids[0], *input_grid, "source");
+          define_field(comp_ids[0], *input_grid, input_grid_name);
       int target_field_id =
-          define_field(comp_ids[1], *output_grid, "target");
+          define_field(comp_ids[1], *output_grid, output_grid_name);
 
       // Define the interpolation stack:
       {
@@ -426,12 +424,12 @@ int main(int argc, char **argv) {
         // Define the coupling between fields:
         const int src_lag = 0;
         const int tgt_lag = 0;
-        yac_cdef_couple("input",              // source component name
-                        "source",             // source grid name
-                        "source",             // source field name
-                        "output",             // target component name
-                        "target",             // target grid name
-                        "target",             // target field name
+        yac_cdef_couple("input",                  // source component name
+                        input_grid_name.c_str(),  // source grid name
+                        input_grid_name.c_str(),  // source field name
+                        "output",                 // target component name
+                        output_grid_name.c_str(), // target grid name
+                        output_grid_name.c_str(), // target field name
                         "1",                  // time step length in units below
                         YAC_TIME_UNIT_SECOND, // time step length units
                         YAC_REDUCTION_TIME_NONE, // reduction in time (for
