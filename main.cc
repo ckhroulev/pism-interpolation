@@ -260,6 +260,29 @@ std::string projection(MPI_Comm com, const std::string &filename,
   return input_file.read_text_attribute("PISM_GLOBAL", "proj");
 }
 
+static double interpolate(int source_field, const pism::array::Scalar &source,
+                          int target_field, pism::array::Scalar &target) {
+
+  pism::petsc::VecArray input_array(source.vec());
+  pism::petsc::VecArray output_array(target.vec());
+
+  double *send_field_ = input_array.get();
+  double **send_field[1] = {&send_field_};
+
+  double *recv_field[1] = {output_array.get()};
+
+  int ierror = 0;
+  int send_info = 0;
+  int recv_info = 0;
+  int collection_size = 1;
+  double start = MPI_Wtime();
+  yac_cexchange(source_field, target_field, collection_size, send_field,
+                recv_field, &send_info, &recv_info, &ierror);
+  double end = MPI_Wtime();
+
+  return end - start;
+}
+
 int main(int argc, char **argv) {
 
   MPI_Comm com = MPI_COMM_WORLD;
@@ -368,27 +391,12 @@ int main(int argc, char **argv) {
       pism::array::Scalar output(output_grid, "topg");
       output.metadata().units("m").standard_name("bedrock_altitude");
       output.metadata()["_FillValue"] = {fill_value};
-      {
-        int send_info = 0;
-        int recv_info = 0;
 
-        pism::petsc::VecArray input_array(input_field.vec());
-        pism::petsc::VecArray output_array(output.vec());
+      double time_spent = interpolate(source_field, input_field, target_field, output);
 
-        double *send_field_ = input_array.get();
-        double **send_field[1] = {&send_field_};
-
-        double *recv_field[1] = {output_array.get()};
-
-        start = MPI_Wtime();
-        yac_cexchange(source_field, target_field, collection_size, send_field,
-                      recv_field, &send_info, &recv_info, &ierror);
-        end = MPI_Wtime();
-      }
+      log->message(2, "Data transfer took %f seconds.\n", time_spent);
 
       output.dump(output_file->c_str());
-
-      log->message(2, "Data transfer took %f seconds.\n", end - start);
 
       yac_cfinalize();
     }
