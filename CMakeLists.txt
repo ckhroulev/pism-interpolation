@@ -50,7 +50,7 @@ find_lib(YAC "yac>=3.0.2")
 find_lib(PISM "pism")
 find_lib(PROJ "proj>=6.0")
 
-add_executable(pism_interp main.cc)
+add_executable(pism_interp main.cc YACInterpolation.cc)
 target_link_libraries(pism_interp
   MPI::MPI_C
   MPI::MPI_CXX
