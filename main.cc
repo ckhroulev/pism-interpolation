@@ -18,6 +18,7 @@
 #include "pism/util/petscwrappers/Vec.hh"
 #include "pism/util/pism_options.hh"
 #include "pism/util/projection.hh"
+#include "pism/util/pism_utilities.hh"
 
 extern "C" {
 #include "yac_interface.h"
@@ -391,12 +392,13 @@ int main(int argc, char **argv) {
     target.metadata()["_FillValue"] = {fill_value};
 
     {
+      int instance_id = 0;
       // Initialize YAC:
       {
-        yac_cinit();
+        yac_cinit_instance(&instance_id);
         yac_cdef_calendar(YAC_PROLEPTIC_GREGORIAN);
         // Note: zero-padding of months and days *is* required.
-        yac_cdef_datetime("-1-01-01", "+1-01-01");
+        yac_cdef_datetime_instance(instance_id, "-1-01-01", "+1-01-01");
       }
 
       // Define components: this has to be done using *one* call
@@ -404,12 +406,15 @@ int main(int argc, char **argv) {
       const int n_comps = 2;
       const char *comp_names[n_comps] = {"input", "output"};
       int comp_ids[n_comps] = {0, 0};
-      yac_cdef_comps(comp_names, n_comps, comp_ids);
+      yac_cdef_comps_instance(instance_id, comp_names, n_comps, comp_ids);
 
       int source_field_id =
           define_field(comp_ids[0], *input_grid, input_grid_name);
       int target_field_id =
           define_field(comp_ids[1], *output_grid, output_grid_name);
+
+      auto couple_name = pism::printf("%s -> %s", input_grid_name.c_str(),
+                                      output_grid_name.c_str());
 
       // Define the interpolation stack:
       {
@@ -424,30 +429,29 @@ int main(int argc, char **argv) {
         // Define the coupling between fields:
         const int src_lag = 0;
         const int tgt_lag = 0;
-        yac_cdef_couple("input",                  // source component name
-                        input_grid_name.c_str(),  // source grid name
-                        input_grid_name.c_str(),  // source field name
-                        "output",                 // target component name
-                        output_grid_name.c_str(), // target grid name
-                        output_grid_name.c_str(), // target field name
-                        "1",                  // time step length in units below
-                        YAC_TIME_UNIT_SECOND, // time step length units
-                        YAC_REDUCTION_TIME_NONE, // reduction in time (for
-                                                 // asynchronous coupling)
-                        interp_stack_id, src_lag, tgt_lag);
+        yac_cdef_couple_instance(
+            instance_id,
+            "input",                  // source component name
+            input_grid_name.c_str(),  // source grid name
+            input_grid_name.c_str(),  // source field name
+            "output",                 // target component name
+            output_grid_name.c_str(), // target grid name
+            output_grid_name.c_str(), // target field name
+            "1",                      // time step length in units below
+            YAC_TIME_UNIT_SECOND,     // time step length units
+            YAC_REDUCTION_TIME_NONE,  // reduction in time (for
+                                      // asynchronous coupling)
+            interp_stack_id, src_lag, tgt_lag);
 
         // free the interpolation stack config now that we defined the coupling
         yac_cfree_interp_stack_config(interp_stack_id);
       }
 
-      log->message(2, "Initializing interpolation... ");
+      log->message(2, "Initializing interpolation %s... ", couple_name.c_str());
       double start = MPI_Wtime();
-      yac_cenddef();
+      yac_cenddef_instance(instance_id);
       double end = MPI_Wtime();
       log->message(2, "done in %f seconds.\n", end - start);
-
-      int collection_size = 1;
-      int ierror = 0;
 
       double time_spent = interpolate(source_field_id, source, target_field_id, target);
 
@@ -455,7 +459,7 @@ int main(int argc, char **argv) {
 
       target.dump(output_filename->c_str());
 
-      yac_cfinalize();
+      yac_cfinalize_instance(instance_id);
     }
 
   } catch (...) {
