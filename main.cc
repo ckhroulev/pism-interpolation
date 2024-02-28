@@ -69,44 +69,6 @@ struct LonLatGrid {
   }
 };
 
-struct ProjectedGrid {
-
-  // grid coordinates, in meters
-  std::vector<double> x, y;
-
-  // PROJ string defining the projection
-  std::string projection;
-
-  // Domain decomposition
-
-  // first x index of the local subdomain
-  int xs;
-  // number of grid points in the x direction in the local subdomain
-  int xm;
-  // first y index of the local subdomain
-  int ys;
-  // number of grid points in the y direction in the local subdomain
-  int ym;
-
-  ProjectedGrid(const std::vector<double> &x_, const std::vector<double> &y_,
-                const std::string &projection_) {
-    x = x_;
-    y = y_;
-    projection = projection_;
-    xs = 0;
-    xm = x.size();
-    ys = 0;
-    ym = y.size();
-  }
-
-  void set_decomposition(int xs_, int xm_, int ys_, int ym_) {
-    xs = xs_;
-    xm = xm_;
-    ys = ys_;
-    ym = ym_;
-  }
-};
-
 //! Get projection info from a NetCDF file.
 pism::MappingInfo mapping(const pism::File &file,
                           pism::units::System::Ptr sys) {
@@ -160,32 +122,32 @@ private:
 int YACInterpolation::define_grid(const pism::Grid &grid,
                                   const std::string &grid_name,
                                   const std::string &projection) {
+  int xs = grid.xs();
+  int ys = grid.ys();
+  int xm = grid.xm();
+  int ym = grid.ym();
 
-  ProjectedGrid info(grid.x(), grid.y(), projection);
-  info.set_decomposition(grid.xs(), grid.xm(), grid.ys(), grid.ym());
-
-  std::vector<double> x(info.xm);
-  std::vector<double> y(info.ym);
+  std::vector<double> x(xm);
+  std::vector<double> y(ym);
 
   // Set x and y to coordinates of cell centers:
   {
-    for (int k = 0; k < x.size(); ++k) {
-      x[k] = info.x[info.xs + k];
+    for (int k = 0; k < xm; ++k) {
+      x[k] = grid.x(xs + k);
     }
-    for (int k = 0; k < y.size(); ++k) {
-      y[k] = info.y[info.ys + k];
+    for (int k = 0; k < ym; ++k) {
+      y[k] = grid.y(ys + k);
     }
   }
 
   // Compute lon,lat coordinates of cell centers:
   LonLatGrid cells(x, y, projection);
-  int n_cells[2] = {(int)x.size(), (int)y.size()};
 
   // Shift x and y by half a grid spacing and add one more row and
   // column to get coordinates of cell corners:
   {
-    double dx = info.x[1] - info.x[0];
-    double dy = info.y[1] - info.y[0];
+    double dx = x[1] - x[0];
+    double dy = y[1] - y[0];
 
     double x_last = x.back() + 0.5 * dx;
     for (int k = 0; k < x.size(); ++k) {
@@ -204,12 +166,12 @@ int YACInterpolation::define_grid(const pism::Grid &grid,
   LonLatGrid nodes(x, y, projection);
   int n_nodes[2] = {(int)x.size(), (int)y.size()};
 
-  std::vector<int> cell_global_index(n_cells[0] * n_cells[1]);
+  std::vector<int> cell_global_index(xm * ym);
   {
-    int Mx = info.x.size();
+    int Mx = grid.Mx();
     int k = 0;
-    for (int j = info.ys; j < info.ys + info.ym; ++j) {
-      for (int i = info.xs; i < info.xs + info.xm; ++i) {
+    for (int j = ys; j < ys + ym; ++j) {
+      for (int i = xs; i < xs + xm; ++i) {
         cell_global_index[k] = j * Mx + i;
         ++k;
       }
@@ -227,6 +189,7 @@ int YACInterpolation::define_grid(const pism::Grid &grid,
 
     yac_cset_global_index(cell_global_index.data(), YAC_LOCATION_CELL, grid_id);
 
+    int n_cells[2] = {xm, ym};
     yac_cdef_points_curve2d(grid_id, n_cells, YAC_LOCATION_CELL,
                             cells.lon.data(), cells.lat.data(), &point_id);
   }
