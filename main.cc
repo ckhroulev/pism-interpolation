@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <memory>
 #include <mpi.h>
 #include <pism/util/array/Array.hh>
@@ -268,13 +269,11 @@ static int interpolation_coarse_to_fine(double missing_value) {
 }
 
 //! Get projection info from a NetCDF file.
-pism::MappingInfo mapping(MPI_Comm com, const std::string &filename,
+pism::MappingInfo mapping(const pism::File &file,
                           pism::units::System::Ptr sys) {
-  pism::File input_file(com, filename, pism::io::PISM_GUESS,
-                        pism::io::PISM_READONLY);
 
   pism::MappingInfo result("mapping", sys);
-  result.proj = input_file.read_text_attribute("PISM_GLOBAL", "proj");
+  result.proj = file.read_text_attribute("PISM_GLOBAL", "proj");
 
   return result;
 }
@@ -290,7 +289,7 @@ pism::MappingInfo mapping(MPI_Comm com, const std::string &filename,
  *
  * The output has the form "input_file.nc:y:x".
  */
-static std::string grid_name(pism::File &file, const std::string &variable_name,
+static std::string grid_name(const pism::File &file, const std::string &variable_name,
                              pism::units::System::Ptr sys) {
   std::string result = file.filename();
   for (const auto &d : file.dimensions(variable_name)) {
@@ -327,6 +326,172 @@ static double interpolate(int source_field_id, const pism::array::Scalar &source
   return end - start;
 }
 
+class YACInterpolation {
+public:
+  YACInterpolation(const pism::Grid &grid,
+                   const pism::File &file,
+                   const std::string &variable_name);
+  ~YACInterpolation();
+
+  void regrid(const pism::File &file, pism::io::Default default_value,
+              pism::array::Scalar &target) const;
+
+  std::string source_grid_name() const;
+private:
+  double interpolate(const pism::array::Scalar &source,
+                     pism::array::Scalar &target) const;
+
+  int m_instance_id;
+  int m_source_field_id;
+  int m_target_field_id;
+
+  std::string m_source_grid_name;
+  std::shared_ptr<pism::array::Scalar> m_buffer;
+};
+
+std::string YACInterpolation::source_grid_name() const {
+  return m_source_grid_name;
+}
+
+static void pism_yac_error_handler(MPI_Comm comm, const char *msg,
+                                   const char *source, int line) {
+  throw pism::RuntimeError::formatted(pism::ErrorLocation(source, line),
+                                      "YAC error: %s", msg);
+}
+
+YACInterpolation::YACInterpolation(const pism::Grid &target_grid,
+                                   const pism::File &file,
+                                   const std::string &variable_name) {
+  auto ctx = target_grid.ctx();
+
+  yac_set_abort_handler((yac_abort_func)pism_yac_error_handler);
+
+  try {
+    auto log = ctx->log();
+
+    auto source_grid = pism::Grid::FromFile(ctx, file, {variable_name},
+                                            pism::grid::CELL_CENTER);
+
+    m_source_grid_name = grid_name(file, variable_name, ctx->unit_system());
+
+    source_grid->set_mapping_info(mapping(file, ctx->unit_system()));
+
+    log->message(2, "Input:\n");
+    source_grid->report_parameters();
+
+    m_buffer =
+        std::make_shared<pism::array::Scalar>(source_grid, variable_name);
+
+    std::string target_grid_name = "internal";
+    double fill_value = NAN;
+    {
+      // Initialize YAC:
+      {
+        yac_cinit_instance(&m_instance_id);
+        yac_cdef_calendar(YAC_YEAR_OF_365_DAYS);
+        // Note: zero-padding of months and days *is* required.
+        yac_cdef_datetime_instance(m_instance_id, "-1-01-01", "+1-01-01");
+      }
+
+      // Define components: this has to be done using *one* call
+      // (cannot call yac_cdef_comp?_instance() more than once)
+      const int n_comps = 2;
+      const char *comp_names[n_comps] = {"source_component",
+                                         "target_component"};
+      int comp_ids[n_comps] = {0, 0};
+      yac_cdef_comps_instance(m_instance_id, comp_names, n_comps, comp_ids);
+
+      m_source_field_id =
+          define_field(comp_ids[0], *source_grid, m_source_grid_name);
+      m_target_field_id =
+          define_field(comp_ids[1], target_grid, target_grid_name);
+
+      // Define the interpolation stack:
+      {
+        int interp_stack_id = 0;
+        if (source_grid->dx() < target_grid.dx() or
+            source_grid->dy() < target_grid.dy()) {
+          interp_stack_id = interpolation_fine_to_coarse(fill_value);
+        } else {
+          interp_stack_id = interpolation_coarse_to_fine(fill_value);
+        }
+
+        // Define the coupling between fields:
+        const int src_lag = 0;
+        const int tgt_lag = 0;
+        yac_cdef_couple_instance(
+            m_instance_id,
+            "source_component",         // source component name
+            m_source_grid_name.c_str(), // source grid name
+            m_source_grid_name.c_str(), // source field name
+            "target_component",         // target component name
+            target_grid_name.c_str(),   // target grid name
+            target_grid_name.c_str(),   // target field name
+            "1",                        // time step length in units below
+            YAC_TIME_UNIT_SECOND,       // time step length units
+            YAC_REDUCTION_TIME_NONE,    // reduction in time (for
+                                        // asynchronous coupling)
+            interp_stack_id, src_lag, tgt_lag);
+
+        // free the interpolation stack config now that we defined the coupling
+        yac_cfree_interp_stack_config(interp_stack_id);
+      }
+
+      double start = MPI_Wtime();
+      yac_cenddef_instance(m_instance_id);
+      double end = MPI_Wtime();
+      log->message(2, "Initialized interpolation from %s in %f seconds.\n",
+                   m_source_grid_name.c_str(), end - start);
+    }
+  } catch (pism::RuntimeError &e) {
+    e.add_context("initializing interpolation from %s to the internal grid",
+                  file.filename().c_str());
+    throw;
+  }
+}
+
+YACInterpolation::~YACInterpolation() {
+  yac_ccleanup_instance(m_instance_id);
+}
+
+double YACInterpolation::interpolate(const pism::array::Scalar &source,
+                                     pism::array::Scalar &target) const {
+
+  pism::petsc::VecArray input_array(source.vec());
+  pism::petsc::VecArray output_array(target.vec());
+
+  double *send_field_ = input_array.get();
+  double **send_field[1] = {&send_field_};
+
+  double *recv_field[1] = {output_array.get()};
+
+  int ierror = 0;
+  int send_info = 0;
+  int recv_info = 0;
+  int collection_size = 1;
+  double start = MPI_Wtime();
+  yac_cexchange(m_source_field_id, m_target_field_id, collection_size, send_field,
+                recv_field, &send_info, &recv_info, &ierror);
+  double end = MPI_Wtime();
+
+  return end - start;
+}
+
+void YACInterpolation::regrid(const pism::File &file,
+                              pism::io::Default default_value,
+                              pism::array::Scalar &target) const {
+
+  m_buffer->metadata(0) = target.metadata(0);
+
+  m_buffer->regrid(file, default_value);
+
+  double time_spent = interpolate(*m_buffer, target);
+
+  auto log = target.grid()->ctx()->log();
+
+  log->message(2, "Interpolation took %f seconds.\n", time_spent);
+}
+
 int main(int argc, char **argv) {
 
   MPI_Comm com = MPI_COMM_WORLD;
@@ -349,118 +514,32 @@ int main(int argc, char **argv) {
     pism::options::String output_grid_filename(
         "-output", "name of the file describing the output grid");
 
-    auto log = ctx->log();
-
-    auto input_grid = pism::Grid::FromFile(ctx, input_filename, {"topg"},
-                                           pism::grid::CELL_CENTER);
-
-    std::string input_grid_name;
-    {
-      pism::File input_file(ctx->com(), input_filename, pism::io::PISM_GUESS,
-                            pism::io::PISM_READONLY);
-
-      input_grid_name = grid_name(input_file, "topg", ctx->unit_system());
-    }
-
-    input_grid->set_mapping_info(mapping(ctx->com(), input_filename, ctx->unit_system()));
-
-    log->message(2, "\nInput: %s\n", input_grid_name.c_str());
-    input_grid->report_parameters();
-
     auto output_grid = pism::Grid::FromFile(ctx, output_grid_filename, {"topg"},
                                             pism::grid::CELL_CENTER);
 
-    std::string output_grid_name;
     {
       pism::File output_file(ctx->com(), output_grid_filename, pism::io::PISM_GUESS,
                             pism::io::PISM_READONLY);
 
-      output_grid_name = grid_name(output_file, "topg", ctx->unit_system());
+      output_grid->set_mapping_info(mapping(output_file, ctx->unit_system()));
     }
 
-    output_grid->set_mapping_info(mapping(ctx->com(), output_grid_filename, ctx->unit_system()));
+    auto log = ctx->log();
 
-    log->message(2, "\nOutput: %s\n", output_grid_name.c_str());
+    pism::File input_file(ctx->com(), input_filename, pism::io::PISM_GUESS, pism::io::PISM_READONLY);
+
+    YACInterpolation interp(*output_grid, input_file, "topg");
+
+    log->message(2, "Output:\n");
     output_grid->report_parameters();
-
-    pism::array::Scalar source(input_grid, "topg");
-    source.metadata().units("m").standard_name("bedrock_altitude");
-    source.regrid(input_filename, pism::io::Default::Nil());
 
     pism::array::Scalar target(output_grid, "topg");
     target.metadata().units("m").standard_name("bedrock_altitude");
     target.metadata()["_FillValue"] = {fill_value};
 
-    {
-      int instance_id = 0;
-      // Initialize YAC:
-      {
-        yac_cinit_instance(&instance_id);
-        yac_cdef_calendar(YAC_PROLEPTIC_GREGORIAN);
-        // Note: zero-padding of months and days *is* required.
-        yac_cdef_datetime_instance(instance_id, "-1-01-01", "+1-01-01");
-      }
+    interp.regrid(input_file, pism::io::Default::Nil(), target);
 
-      // Define components: this has to be done using *one* call
-      // (cannot call yac_cdef_comp?_instance() more than once)
-      const int n_comps = 2;
-      const char *comp_names[n_comps] = {"input", "output"};
-      int comp_ids[n_comps] = {0, 0};
-      yac_cdef_comps_instance(instance_id, comp_names, n_comps, comp_ids);
-
-      int source_field_id =
-          define_field(comp_ids[0], *input_grid, input_grid_name);
-      int target_field_id =
-          define_field(comp_ids[1], *output_grid, output_grid_name);
-
-      auto couple_name = pism::printf("%s -> %s", input_grid_name.c_str(),
-                                      output_grid_name.c_str());
-
-      // Define the interpolation stack:
-      {
-        int interp_stack_id = 0;
-        if (input_grid->dx() < output_grid->dx() or
-            input_grid->dy() < output_grid->dy()) {
-          interp_stack_id = interpolation_fine_to_coarse(fill_value);
-        } else {
-          interp_stack_id = interpolation_coarse_to_fine(fill_value);
-        }
-
-        // Define the coupling between fields:
-        const int src_lag = 0;
-        const int tgt_lag = 0;
-        yac_cdef_couple_instance(
-            instance_id,
-            "input",                  // source component name
-            input_grid_name.c_str(),  // source grid name
-            input_grid_name.c_str(),  // source field name
-            "output",                 // target component name
-            output_grid_name.c_str(), // target grid name
-            output_grid_name.c_str(), // target field name
-            "1",                      // time step length in units below
-            YAC_TIME_UNIT_SECOND,     // time step length units
-            YAC_REDUCTION_TIME_NONE,  // reduction in time (for
-                                      // asynchronous coupling)
-            interp_stack_id, src_lag, tgt_lag);
-
-        // free the interpolation stack config now that we defined the coupling
-        yac_cfree_interp_stack_config(interp_stack_id);
-      }
-
-      log->message(2, "Initializing interpolation %s... ", couple_name.c_str());
-      double start = MPI_Wtime();
-      yac_cenddef_instance(instance_id);
-      double end = MPI_Wtime();
-      log->message(2, "done in %f seconds.\n", end - start);
-
-      double time_spent = interpolate(source_field_id, source, target_field_id, target);
-
-      log->message(2, "Data transfer took %f seconds.\n", time_spent);
-
-      target.dump(output_filename->c_str());
-
-      yac_cfinalize_instance(instance_id);
-    }
+    target.dump(output_filename->c_str());
 
   } catch (...) {
     pism::handle_fatal_errors(com);
