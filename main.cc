@@ -107,13 +107,59 @@ struct ProjectedGrid {
   }
 };
 
+//! Get projection info from a NetCDF file.
+pism::MappingInfo mapping(const pism::File &file,
+                          pism::units::System::Ptr sys) {
+
+  pism::MappingInfo result("mapping", sys);
+  result.proj = file.read_text_attribute("PISM_GLOBAL", "proj");
+
+  return result;
+}
+
+class YACInterpolation {
+public:
+  YACInterpolation(const pism::Grid &grid,
+                   const pism::File &file,
+                   const std::string &variable_name);
+  ~YACInterpolation();
+
+  void regrid(const pism::File &file, pism::io::Default default_value,
+              pism::array::Scalar &target) const;
+
+  std::string source_grid_name() const;
+private:
+  double interpolate(const pism::array::Scalar &source,
+                     pism::array::Scalar &target) const;
+
+  static std::string grid_name(const pism::File &file, const std::string &variable_name,
+                      pism::units::System::Ptr sys);
+
+  static int interpolation_coarse_to_fine(double missing_value);
+  static int interpolation_fine_to_coarse(double missing_value);
+
+  static int define_field(int comp_id, int point_id, const char *field_name);
+  static int define_field(int component_id, const pism::Grid &pism_grid,
+                          const std::string &name);
+  static int define_grid(const pism::Grid &grid, const std::string &grid_name,
+                         const std::string &projection);
+
+  int m_instance_id;
+  int m_source_field_id;
+  int m_target_field_id;
+
+  std::string m_source_grid_name;
+  std::shared_ptr<pism::array::Scalar> m_buffer;
+};
+
 /*!
  * Define the PISM grid. Each PE defines its own subdomain.
  *
  * Returns the point ID that can be used to define a "field".
  */
-static int define_grid(const pism::Grid &grid, const std::string &grid_name,
-                       const std::string &projection) {
+int YACInterpolation::define_grid(const pism::Grid &grid,
+                                  const std::string &grid_name,
+                                  const std::string &projection) {
 
   ProjectedGrid info(grid.x(), grid.y(), projection);
   info.set_decomposition(grid.xs(), grid.xm(), grid.ys(), grid.ym());
@@ -190,7 +236,8 @@ static int define_grid(const pism::Grid &grid, const std::string &grid_name,
 /*!
  * Define a "field" on a point set `point_id` in the component `comp_id`.
  */
-static int define_field(int comp_id, int point_id, const char *field_name) {
+int YACInterpolation::define_field(int comp_id, int point_id,
+                                   const char *field_name) {
 
   const char *time_step_length = "1";
   const int point_set_size = 1;
@@ -212,15 +259,37 @@ static int define_field(int comp_id, int point_id, const char *field_name) {
  * @param[in] projection PROJ string defining the projection
  * @param[in] name string describing this grid and field
  */
-static int define_field(int component_id, const pism::Grid &pism_grid,
-                        const std::string &name) {
+int YACInterpolation::define_field(int component_id,
+                                   const pism::Grid &pism_grid,
+                                   const std::string &name) {
   return define_field(
       component_id,
       define_grid(pism_grid, name, pism_grid.get_mapping_info().proj),
       name.c_str());
 }
 
-static int interpolation_fine_to_coarse(double missing_value) {
+int YACInterpolation::interpolation_coarse_to_fine(double missing_value) {
+  int id = 0;
+  yac_cget_interp_stack_config(&id);
+
+  int partial_coverage = 0;
+
+  // average over source grid nodes containing a target point, weighted using
+  // barycentric local coordinates
+  yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
+
+  // nearest neighbor
+  int n_neighbors = 1;
+  double scaling = 1.0;
+  yac_cadd_interp_stack_config_nnn(id, YAC_NNN_DIST, n_neighbors, scaling);
+
+  // constant if all of the above failed
+  yac_cadd_interp_stack_config_fixed(id, missing_value);
+
+  return id;
+}
+
+int YACInterpolation::interpolation_fine_to_coarse(double missing_value) {
   int id = 0;
   yac_cget_interp_stack_config(&id);
 
@@ -247,37 +316,6 @@ static int interpolation_fine_to_coarse(double missing_value) {
   return id;
 }
 
-static int interpolation_coarse_to_fine(double missing_value) {
-  int id = 0;
-  yac_cget_interp_stack_config(&id);
-
-  int partial_coverage = 0;
-
-  // average over source grid nodes containing a target point, weighted using
-  // barycentric local coordinates
-  yac_cadd_interp_stack_config_average(id, YAC_AVG_BARY, partial_coverage);
-
-  // nearest neighbor
-  int n_neighbors = 1;
-  double scaling = 1.0;
-  yac_cadd_interp_stack_config_nnn(id, YAC_NNN_DIST, n_neighbors, scaling);
-
-  // constant if all of the above failed
-  yac_cadd_interp_stack_config_fixed(id, missing_value);
-
-  return id;
-}
-
-//! Get projection info from a NetCDF file.
-pism::MappingInfo mapping(const pism::File &file,
-                          pism::units::System::Ptr sys) {
-
-  pism::MappingInfo result("mapping", sys);
-  result.proj = file.read_text_attribute("PISM_GLOBAL", "proj");
-
-  return result;
-}
-
 /*!
  * Return the string that describes a 2D grid present in a NetCDF file.
  *
@@ -289,8 +327,8 @@ pism::MappingInfo mapping(const pism::File &file,
  *
  * The output has the form "input_file.nc:y:x".
  */
-static std::string grid_name(const pism::File &file, const std::string &variable_name,
-                             pism::units::System::Ptr sys) {
+std::string YACInterpolation::grid_name(const pism::File &file, const std::string &variable_name,
+                                        pism::units::System::Ptr sys) {
   std::string result = file.filename();
   for (const auto &d : file.dimensions(variable_name)) {
     auto type = file.dimension_type(d, sys);
@@ -302,52 +340,6 @@ static std::string grid_name(const pism::File &file, const std::string &variable
   }
   return result;
 }
-
-static double interpolate(int source_field_id, const pism::array::Scalar &source,
-                          int target_field_id, pism::array::Scalar &target) {
-
-  pism::petsc::VecArray input_array(source.vec());
-  pism::petsc::VecArray output_array(target.vec());
-
-  double *send_field_ = input_array.get();
-  double **send_field[1] = {&send_field_};
-
-  double *recv_field[1] = {output_array.get()};
-
-  int ierror = 0;
-  int send_info = 0;
-  int recv_info = 0;
-  int collection_size = 1;
-  double start = MPI_Wtime();
-  yac_cexchange(source_field_id, target_field_id, collection_size, send_field,
-                recv_field, &send_info, &recv_info, &ierror);
-  double end = MPI_Wtime();
-
-  return end - start;
-}
-
-class YACInterpolation {
-public:
-  YACInterpolation(const pism::Grid &grid,
-                   const pism::File &file,
-                   const std::string &variable_name);
-  ~YACInterpolation();
-
-  void regrid(const pism::File &file, pism::io::Default default_value,
-              pism::array::Scalar &target) const;
-
-  std::string source_grid_name() const;
-private:
-  double interpolate(const pism::array::Scalar &source,
-                     pism::array::Scalar &target) const;
-
-  int m_instance_id;
-  int m_source_field_id;
-  int m_target_field_id;
-
-  std::string m_source_grid_name;
-  std::shared_ptr<pism::array::Scalar> m_buffer;
-};
 
 std::string YACInterpolation::source_grid_name() const {
   return m_source_grid_name;
