@@ -320,13 +320,17 @@ YACInterpolation::YACInterpolation(const pism::Grid &target_grid,
 
       // Define the interpolation stack:
       {
+        std::string direction;
         int interp_stack_id = 0;
         if (source_grid->dx() < target_grid.dx() or
             source_grid->dy() < target_grid.dy()) {
           interp_stack_id = interpolation_fine_to_coarse(fill_value);
+          direction = "fine to coarse";
         } else {
           interp_stack_id = interpolation_coarse_to_fine(fill_value);
+          direction = "coarse to fine";
         }
+        log->message(2, "Interpolation direction: %s\n", direction.c_str());
 
         // Define the coupling between fields:
         const int src_lag = 0;

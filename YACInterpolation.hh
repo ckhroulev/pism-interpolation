@@ -28,12 +28,12 @@ public:
               pism::array::Scalar &target) const;
 
   std::string source_grid_name() const;
-private:
-  double interpolate(const pism::array::Scalar &source,
-                     pism::array::Scalar &target) const;
 
   static std::string grid_name(const pism::File &file, const std::string &variable_name,
                       pism::units::System::Ptr sys);
+private:
+  double interpolate(const pism::array::Scalar &source,
+                     pism::array::Scalar &target) const;
 
   static int interpolation_coarse_to_fine(double missing_value);
   static int interpolation_fine_to_coarse(double missing_value);

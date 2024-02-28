@@ -9,23 +9,25 @@
 #include "pism/util/pism_options.hh"
 
 #include "YACInterpolation.hh"
+#include <memory>
+#include <pism/util/pism_utilities.hh>
 
 int main(int argc, char **argv) {
 
   MPI_Comm com = MPI_COMM_WORLD;
   pism::petsc::Initializer petsc(argc, argv, "");
 
-  double fill_value = -99999;
-
   int exit_code = 0;
   try {
 
     auto ctx = pism::context_from_options(com, "");
 
+    auto log = ctx->log();
+
     pism::options::String input_filename(
         "-input", "name of the file describing the input grid");
 
-    pism::options::String output_filename("-o", "name of the output file");
+    pism::options::String variables("-v", "comma separated list of variables");
 
     pism::options::String output_grid_filename(
         "-output", "name of the file describing the output grid");
@@ -34,29 +36,38 @@ int main(int argc, char **argv) {
                                             pism::grid::CELL_CENTER);
 
     {
-      pism::File output_file(ctx->com(), output_grid_filename, pism::io::PISM_GUESS,
-                            pism::io::PISM_READONLY);
+      pism::File F(ctx->com(), output_grid_filename, pism::io::PISM_GUESS,
+                   pism::io::PISM_READONLY);
 
-      output_grid->set_mapping_info(mapping(output_file, ctx->unit_system()));
+      output_grid->set_mapping_info(mapping(F, ctx->unit_system()));
     }
 
-    auto log = ctx->log();
+    log->message(2, "Output grid:\n");
+    output_grid->report_parameters();
 
     pism::File input_file(ctx->com(), input_filename, pism::io::PISM_GUESS, pism::io::PISM_READONLY);
 
-    YACInterpolation interp(*output_grid, input_file, "topg");
+    pism::array::Scalar target(output_grid, "temporary_storage");
 
-    log->message(2, "Output:\n");
-    output_grid->report_parameters();
+    std::map<std::string, std::shared_ptr<YACInterpolation>> maps;
 
-    pism::array::Scalar target(output_grid, "topg");
-    target.metadata().units("m").standard_name("bedrock_altitude");
-    target.metadata()["_FillValue"] = {fill_value};
+    for (const auto &v : pism::split(variables, ',')) {
+      auto grid_name = YACInterpolation::grid_name(input_file, v, ctx->unit_system());
 
-    interp.regrid(input_file, pism::io::Default::Nil(), target);
+      auto map = maps[grid_name];
+      if (map == nullptr) {
+        map = std::make_shared<YACInterpolation>(*output_grid, input_file, v);
+        maps[grid_name] = map;
+      }
+      target.metadata()
+        .set_name(v)
+        .units(input_file.read_text_attribute(v, "units"));
 
-    target.dump(output_filename->c_str());
+      map->regrid(input_file, pism::io::Default::Nil(), target);
 
+      auto filename = pism::printf("o_%s.nc", v.c_str());
+      target.dump(filename.c_str());
+    }
   } catch (...) {
     pism::handle_fatal_errors(com);
     exit_code = 1;
