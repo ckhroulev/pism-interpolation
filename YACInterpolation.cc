@@ -249,7 +249,7 @@ int YACInterpolation::interpolation_fine_to_coarse(double missing_value) {
  */
 std::string YACInterpolation::grid_name(const pism::File &file, const std::string &variable_name,
                                         pism::units::System::Ptr sys) {
-  std::string result = file.filename();
+  std::string result = file.name();
   for (const auto &d : file.dimensions(variable_name)) {
     auto type = file.dimension_type(d, sys);
 
@@ -361,7 +361,7 @@ YACInterpolation::YACInterpolation(const pism::Grid &target_grid,
     }
   } catch (pism::RuntimeError &e) {
     e.add_context("initializing interpolation from %s to the internal grid",
-                  file.filename().c_str());
+                  file.name().c_str());
     throw;
   }
 }
