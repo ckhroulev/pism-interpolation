@@ -154,38 +154,29 @@ int YACInterpolation::define_grid(const pism::Grid &grid,
 }
 
 /*!
- * Define a "field" on a point set `point_id` in the component `comp_id`.
+ * Return the YAC field_id corresponding to a given PISM grid and its
+ * projection info.
+ *
+ * @param[in] component_id YAC component ID
+ * @param[in] pism_grid PISM's grid
+ * @param[in] name string describing this grid and field
  */
-int YACInterpolation::define_field(int comp_id, int point_id,
-                                   const char *field_name) {
+int YACInterpolation::define_field(int component_id,
+                                   const pism::Grid &pism_grid,
+                                   const std::string &name) {
+
+  int point_id =
+      define_grid(pism_grid, name, pism_grid.get_mapping_info().proj);
 
   const char *time_step_length = "1";
   const int point_set_size = 1;
   const int collection_size = 1;
 
   int field_id = 0;
-  yac_cdef_field(field_name, comp_id, &point_id, point_set_size,
+  yac_cdef_field(name.c_str(), component_id, &point_id, point_set_size,
                  collection_size, time_step_length, YAC_TIME_UNIT_SECOND,
                  &field_id);
-
   return field_id;
-}
-
-/*!
- * Return the YAC field_id corresponding to a given grid and projection.
- *
- * @param[in] component_id YAC component ID
- * @param[in] pism_grid PISM's grid
- * @param[in] projection PROJ string defining the projection
- * @param[in] name string describing this grid and field
- */
-int YACInterpolation::define_field(int component_id,
-                                   const pism::Grid &pism_grid,
-                                   const std::string &name) {
-  return define_field(
-      component_id,
-      define_grid(pism_grid, name, pism_grid.get_mapping_info().proj),
-      name.c_str());
 }
 
 int YACInterpolation::interpolation_coarse_to_fine(double missing_value) {
@@ -261,10 +252,6 @@ std::string YACInterpolation::grid_name(const pism::File &file, const std::strin
   return result;
 }
 
-std::string YACInterpolation::source_grid_name() const {
-  return m_source_grid_name;
-}
-
 static void pism_yac_error_handler(MPI_Comm comm, const char *msg,
                                    const char *source, int line) {
   throw pism::RuntimeError::formatted(pism::ErrorLocation(source, line),
@@ -284,7 +271,7 @@ YACInterpolation::YACInterpolation(const pism::Grid &target_grid,
     auto source_grid = pism::Grid::FromFile(ctx, file, {variable_name},
                                             pism::grid::CELL_CENTER);
 
-    m_source_grid_name = grid_name(file, variable_name, ctx->unit_system());
+    std::string source_grid_name = grid_name(file, variable_name, ctx->unit_system());
 
     source_grid->set_mapping_info(mapping(file, ctx->unit_system()));
 
@@ -314,7 +301,7 @@ YACInterpolation::YACInterpolation(const pism::Grid &target_grid,
       yac_cdef_comps_instance(m_instance_id, comp_names, n_comps, comp_ids);
 
       m_source_field_id =
-          define_field(comp_ids[0], *source_grid, m_source_grid_name);
+          define_field(comp_ids[0], *source_grid, source_grid_name);
       m_target_field_id =
           define_field(comp_ids[1], target_grid, target_grid_name);
 
@@ -338,8 +325,8 @@ YACInterpolation::YACInterpolation(const pism::Grid &target_grid,
         yac_cdef_couple_instance(
             m_instance_id,
             "source_component",         // source component name
-            m_source_grid_name.c_str(), // source grid name
-            m_source_grid_name.c_str(), // source field name
+            source_grid_name.c_str(), // source grid name
+            source_grid_name.c_str(), // source field name
             "target_component",         // target component name
             target_grid_name.c_str(),   // target grid name
             target_grid_name.c_str(),   // target field name
@@ -357,7 +344,7 @@ YACInterpolation::YACInterpolation(const pism::Grid &target_grid,
       yac_cenddef_instance(m_instance_id);
       double end = MPI_Wtime();
       log->message(2, "Initialized interpolation from %s in %f seconds.\n",
-                   m_source_grid_name.c_str(), end - start);
+                   source_grid_name.c_str(), end - start);
     }
   } catch (pism::RuntimeError &e) {
     e.add_context("initializing interpolation from %s to the internal grid",
@@ -399,6 +386,7 @@ void YACInterpolation::regrid(const pism::File &file,
 
   m_buffer->metadata(0) = target.metadata(0);
 
+  // FIXME: could be m_buffer->read(...)
   m_buffer->regrid(file, default_value);
 
   double time_spent = interpolate(*m_buffer, target);

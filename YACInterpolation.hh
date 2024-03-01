@@ -27,8 +27,6 @@ public:
   void regrid(const pism::File &file, pism::io::Default default_value,
               pism::array::Scalar &target) const;
 
-  std::string source_grid_name() const;
-
   static std::string grid_name(const pism::File &file, const std::string &variable_name,
                       pism::units::System::Ptr sys);
 private:
@@ -38,7 +36,6 @@ private:
   static int interpolation_coarse_to_fine(double missing_value);
   static int interpolation_fine_to_coarse(double missing_value);
 
-  static int define_field(int comp_id, int point_id, const char *field_name);
   static int define_field(int component_id, const pism::Grid &pism_grid,
                           const std::string &name);
   static int define_grid(const pism::Grid &grid, const std::string &grid_name,
@@ -48,7 +45,6 @@ private:
   int m_source_field_id;
   int m_target_field_id;
 
-  std::string m_source_grid_name;
   std::shared_ptr<pism::array::Scalar> m_buffer;
 };
 
